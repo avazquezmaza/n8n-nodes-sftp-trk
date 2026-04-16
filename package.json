@@ -1,0 +1,68 @@
+{
+  "name": "n8n-nodes-sftp-trk",
+  "version": "1.0.0",
+  "description": "n8n community node for secure SFTP file download with advanced filtering",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "nodes": [
+      "dist/nodes/SftpDownload/SftpDownload.node.js"
+    ],
+    "credentials": [
+      "dist/credentials/SftpTrk.credentials.js"
+    ]
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "jest --coverage",
+    "test:watch": "jest --watch",
+    "test:unit": "jest --testPathPattern=unit",
+    "test:integration": "jest --testPathPattern=integration",
+    "test:security": "jest --testPathPattern=security",
+    "lint": "eslint src/**/*.ts",
+    "lint:fix": "eslint src/**/*.ts --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "clean": "rm -rf dist coverage",
+    "prepush": "npm run lint && npm run test && npm run build"
+  },
+  "keywords": [
+    "n8n",
+    "sftp",
+    "node",
+    "download",
+    "files"
+  ],
+  "author": "SFTP Download Team",
+  "license": "MIT",
+  "dependencies": {
+    "joi": "^17.11.0",
+    "minimatch": "^9.0.3",
+    "n8n-workflow": "^2.13.1",
+    "pino": "^8.17.2",
+    "ssh2-sftp-client": "^9.1.0",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.11",
+    "@types/node": "^20.10.6",
+    "@types/ssh2-sftp-client": "^9.0.6",
+    "@types/uuid": "^9.0.8",
+    "@typescript-eslint/eslint-plugin": "^6.17.0",
+    "@typescript-eslint/parser": "^6.17.0",
+    "eslint": "^8.56.0",
+    "jest": "^29.7.0",
+    "prettier": "^3.1.1",
+    "ts-jest": "^29.1.1",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "n8n": ">=2.15.0"
+  }
+}
