@@ -141,7 +141,7 @@ describe('secure logging behavior', () => {
         event: LogEvent.CONNECTION_ESTABLISHED,
         credential: {
           password: 'secret123',
-          privateKey: 'BEGIN RSA PRIVATE KEY',
+          privateKey: 'mock-private-key-content',
           token: 'token123',
         },
       });

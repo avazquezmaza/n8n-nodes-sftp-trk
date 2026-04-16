@@ -104,7 +104,7 @@ describe('SftpClient.connect()', () => {
     const keyCred: SftpCredential = {
       host: 'sftp.example.com',
       username: 'u',
-      privateKey: '-----BEGIN RSA PRIVATE KEY-----',
+      privateKey: 'mock-private-key-content',
       authMethod: 'key',
     };
     const client = new SftpClient(keyCred, fastOptions);
