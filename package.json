@@ -18,6 +18,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "prepare": "npm run build",
     "dev": "tsc --watch",
     "test": "jest --coverage",
     "test:watch": "jest --watch",
