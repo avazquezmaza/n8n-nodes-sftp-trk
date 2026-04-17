@@ -542,12 +542,6 @@ export class SftpDownload implements INodeType {
             type: 'boolean',
             default: false,
             description: 'Enable concurrent reads when downloading directory sets',
-            displayOptions: {
-              show: {
-                operation: ['download'],
-                downloadType: ['directorySet'],
-              },
-            },
           },
           {
             displayName: 'Max Concurrent Reads',
@@ -555,12 +549,6 @@ export class SftpDownload implements INodeType {
             type: 'number',
             default: 3,
             description: 'Maximum number of files downloaded simultaneously',
-            displayOptions: {
-              show: {
-                operation: ['download'],
-                downloadType: ['directorySet'],
-              },
-            },
           },
           {
             displayName: 'Skip Errors',
