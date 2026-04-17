@@ -9,19 +9,83 @@ Community node package for n8n that downloads files from SFTP with secure valida
 
 ## Installation
 
-Use this exact command:
+### Docker (recommended)
 
-```bash
-cd /home/node/.n8n && mkdir -p nodes && cd nodes && npm install --ignore-scripts git+https://github.com/avazquezmaza/.gin8n-nodes-sftp-trk.git
+This project is designed to run in Docker-based n8n deployments, including queue mode (`n8n` + `n8n-worker`).
+
+1. Update your `docker-compose.yml`.
+
+Service `n8n` (`main`) must include:
+
+```yaml
+environment:
+  - N8N_ENCRYPTION_KEY=<YOUR_SHARED_KEY>
+  - N8N_COMMUNITY_PACKAGES_ENABLED=true
+  - N8N_CUSTOM_EXTENSIONS=/home/node/.n8n/nodes/node_modules
+volumes:
+  - n8n_data:/home/node/.n8n
 ```
 
-Then restart n8n.
+Service `n8n-worker` must include:
+
+```yaml
+environment:
+  - N8N_ENCRYPTION_KEY=<YOUR_SHARED_KEY>
+  - N8N_CUSTOM_EXTENSIONS=/home/node/.n8n/nodes/node_modules
+volumes:
+  - n8n_data:/home/node/.n8n
+```
+
+Notes:
+- Use the same `N8N_ENCRYPTION_KEY` value in `n8n` and `n8n-worker`.
+- Both services must mount the same `n8n_data` volume.
+- Do not use `--ignore-scripts` when installing from Git, because this package compiles with `prepare`.
+
+2. Recreate services after editing compose:
+
+```bash
+cd /docker/n8n && docker compose up -d --force-recreate n8n n8n-worker
+```
+
+3. Install package inside the `n8n` container:
+
+```bash
+docker exec n8n-n8n-1 sh -c "mkdir -p /home/node/.n8n/nodes && chown -R node:node /home/node/.n8n"
+docker exec -u node n8n-n8n-1 sh -c "cd /home/node/.n8n/nodes && npm install git+https://github.com/avazquezmaza/n8n-nodes-sftp-trk.git --no-audit --no-fund"
+```
+
+4. Restart n8n services:
+
+```bash
+docker restart n8n-n8n-1 n8n-n8n-worker-1
+```
+
+5. Validate installation:
+
+```bash
+docker exec n8n-n8n-1 sh -c "ls /home/node/.n8n/nodes/node_modules/n8n-nodes-sftp-trk/dist/nodes/SftpDownload/"
+docker exec n8n-n8n-1 node -e 'require("/home/node/.n8n/nodes/node_modules/n8n-nodes-sftp-trk/dist/nodes/SftpDownload/SftpDownload.node.js"); console.log("OK_IMPORT")'
+docker logs n8n-n8n-1 --since 3m 2>&1 | grep -Ei "packages are missing|error"
+```
+
+Expected:
+- `SftpDownload.node.js` exists.
+- `OK_IMPORT` is printed.
+- No `packages are missing` message appears.
+
+Then open n8n UI, hard-refresh the browser (`Ctrl+Shift+R`), and search for `SFTP Download TRK` in the regular node picker (not AI Nodes).
 
 ## Node
 
 - Node name: `SFTP Download TRK`
 - Internal type: `sftpDownloadTrk`
 - Credential included in this package: `SFTP TRK`
+- Supported operations:
+  - `List Folder Content`
+  - `Download a File Set`
+  - `Upload a File`
+  - `Delete a File or Folder`
+  - `Rename / Move a File or Folder`
 
 ## Architecture
 
@@ -141,4 +205,3 @@ Run tests:
 ```bash
 npm test
 ```
-# n8n-nodes-sftp-trk

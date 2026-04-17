@@ -70,6 +70,13 @@ export interface DownloadResult {
   durationMs: number;
 }
 
+export interface UploadResult {
+  /** Byte length of the uploaded content */
+  sizeBytes: number;
+  /** Wall-clock duration of the upload in milliseconds */
+  durationMs: number;
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -361,6 +368,100 @@ export class SftpClient {
       sizeBytes: buf.length,
       durationMs,
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // uploadFile
+  // -------------------------------------------------------------------------
+
+  /**
+   * Uploads a Buffer to a remote path.
+   */
+  async uploadFile(remotePath: string, content: Buffer): Promise<UploadResult> {
+    this.assertConnected();
+
+    const parentDir = path.dirname(remotePath);
+    validateRemotePath(parentDir);
+
+    const fileName = path.basename(remotePath);
+    const startTime = Date.now();
+
+    try {
+      await this.client.put(content, remotePath);
+    } catch (err: unknown) {
+      const structured = transformError(toError(err));
+      logError(getLogger(), structured.errorCode, structured.message, { fileName });
+      throw new Error(`${structured.errorCode}: ${structured.message}`);
+    }
+
+    const durationMs = Date.now() - startTime;
+
+    logEvent(getLogger(), {
+      event: LogEvent.EXECUTION_COMPLETED,
+      fileName,
+      fileSize: content.length,
+      durationMs,
+      operationName: 'uploadFile',
+    });
+
+    return {
+      sizeBytes: content.length,
+      durationMs,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // deletePath
+  // -------------------------------------------------------------------------
+
+  /**
+   * Deletes a file or directory from the remote server.
+   */
+  async deletePath(remotePath: string, isDirectory = false): Promise<void> {
+    this.assertConnected();
+
+    validateRemotePath(remotePath);
+
+    try {
+      if (isDirectory) {
+        await this.client.rmdir(remotePath, true);
+      } else {
+        await this.client.delete(remotePath);
+      }
+    } catch (err: unknown) {
+      const structured = transformError(toError(err));
+      logError(getLogger(), structured.errorCode, structured.message, {
+        filePath: remotePath,
+        operationName: 'deletePath',
+      });
+      throw new Error(`${structured.errorCode}: ${structured.message}`);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // movePath
+  // -------------------------------------------------------------------------
+
+  /**
+   * Renames or moves a remote file or directory.
+   */
+  async movePath(sourcePath: string, destinationPath: string): Promise<void> {
+    this.assertConnected();
+
+    validateRemotePath(sourcePath);
+    validateRemotePath(path.dirname(destinationPath));
+
+    try {
+      await this.client.rename(sourcePath, destinationPath);
+    } catch (err: unknown) {
+      const structured = transformError(toError(err));
+      logError(getLogger(), structured.errorCode, structured.message, {
+        sourcePath,
+        destinationPath,
+        operationName: 'movePath',
+      });
+      throw new Error(`${structured.errorCode}: ${structured.message}`);
+    }
   }
 
   // -------------------------------------------------------------------------

@@ -221,18 +221,41 @@ export class SftpDownload implements INodeType {
     ],
     properties: [
       {
+        displayName: 'Operation',
+        name: 'operation',
+        type: 'options',
+        default: 'download',
+        options: [
+          { name: 'List Folder Content', value: 'list' },
+          { name: 'Download a File Set', value: 'download' },
+          { name: 'Upload a File', value: 'upload' },
+          { name: 'Delete a File or Folder', value: 'delete' },
+          { name: 'Rename / Move a File or Folder', value: 'move' },
+        ],
+      },
+      {
         displayName: 'Remote Directory',
         name: 'remoteDirectory',
         type: 'string',
         default: '/exports',
         required: true,
         description: 'Absolute remote directory path on the SFTP server',
+        displayOptions: {
+          show: {
+            operation: ['list', 'download'],
+          },
+        },
       },
       {
         displayName: 'Download Mode',
         name: 'downloadMode',
         type: 'options',
         default: 'all',
+        displayOptions: {
+          show: {
+            operation: ['download'],
+          },
+        },
         options: [
           { name: 'All Files', value: 'all' },
           { name: 'Filtered', value: 'filtered' },
@@ -245,6 +268,7 @@ export class SftpDownload implements INodeType {
         default: 'extension',
         displayOptions: {
           show: {
+            operation: ['download'],
             downloadMode: ['filtered'],
           },
         },
@@ -261,6 +285,7 @@ export class SftpDownload implements INodeType {
         default: '.csv',
         displayOptions: {
           show: {
+            operation: ['download'],
             downloadMode: ['filtered'],
             filterType: ['extension'],
           },
@@ -273,6 +298,7 @@ export class SftpDownload implements INodeType {
         default: 'glob',
         displayOptions: {
           show: {
+            operation: ['download'],
             downloadMode: ['filtered'],
             filterType: ['pattern'],
           },
@@ -289,6 +315,7 @@ export class SftpDownload implements INodeType {
         default: '*.csv',
         displayOptions: {
           show: {
+            operation: ['download'],
             downloadMode: ['filtered'],
             filterType: ['pattern'],
           },
@@ -301,6 +328,7 @@ export class SftpDownload implements INodeType {
         default: '',
         displayOptions: {
           show: {
+            operation: ['download'],
             downloadMode: ['filtered'],
             filterType: ['pattern'],
           },
@@ -315,8 +343,89 @@ export class SftpDownload implements INodeType {
           'Array of rules: [{"type":"include|exclude","patternType":"glob|regex","pattern":"*.csv"}]',
         displayOptions: {
           show: {
+            operation: ['download'],
             downloadMode: ['filtered'],
             filterType: ['multiPattern'],
+          },
+        },
+      },
+      {
+        displayName: 'Remote File Path',
+        name: 'remoteFilePath',
+        type: 'string',
+        default: '/exports/file.txt',
+        required: true,
+        description: 'Absolute remote file path',
+        displayOptions: {
+          show: {
+            operation: ['upload'],
+          },
+        },
+      },
+      {
+        displayName: 'Binary Property',
+        name: 'binaryPropertyName',
+        type: 'string',
+        default: 'data',
+        required: true,
+        description: 'Binary property from input item to upload',
+        displayOptions: {
+          show: {
+            operation: ['upload'],
+          },
+        },
+      },
+      {
+        displayName: 'Delete Path',
+        name: 'deletePath',
+        type: 'string',
+        default: '/exports/file.txt',
+        required: true,
+        description: 'Absolute remote path to delete',
+        displayOptions: {
+          show: {
+            operation: ['delete'],
+          },
+        },
+      },
+      {
+        displayName: 'Delete Type',
+        name: 'deleteType',
+        type: 'options',
+        default: 'file',
+        options: [
+          { name: 'File', value: 'file' },
+          { name: 'Directory', value: 'directory' },
+        ],
+        displayOptions: {
+          show: {
+            operation: ['delete'],
+          },
+        },
+      },
+      {
+        displayName: 'Source Path',
+        name: 'sourcePath',
+        type: 'string',
+        default: '/exports/source.txt',
+        required: true,
+        description: 'Current remote path',
+        displayOptions: {
+          show: {
+            operation: ['move'],
+          },
+        },
+      },
+      {
+        displayName: 'Destination Path',
+        name: 'destinationPath',
+        type: 'string',
+        default: '/exports/destination.txt',
+        required: true,
+        description: 'New remote path',
+        displayOptions: {
+          show: {
+            operation: ['move'],
           },
         },
       },
@@ -325,6 +434,11 @@ export class SftpDownload implements INodeType {
         name: 'options',
         type: 'collection',
         default: {},
+        displayOptions: {
+          show: {
+            operation: ['list', 'download'],
+          },
+        },
         options: [
           {
             displayName: 'List Only',
@@ -391,9 +505,12 @@ export class SftpDownload implements INodeType {
           event: LogEvent.EXECUTION_STARTED,
           operationName: 'sftp_download_execute',
         });
-
-        const remoteDirectory = this.getNodeParameter('remoteDirectory', itemIndex) as string;
-        const downloadMode = this.getNodeParameter('downloadMode', itemIndex) as 'all' | 'filtered';
+        const operation = this.getNodeParameter('operation', itemIndex) as
+          | 'list'
+          | 'download'
+          | 'upload'
+          | 'delete'
+          | 'move';
         const options = parseOptions(this, itemIndex);
 
         const credentialsData = await this.getCredentials('sftpTrk');
@@ -405,10 +522,87 @@ export class SftpDownload implements INodeType {
 
         await client.connect();
 
+        if (operation === 'upload') {
+          const remoteFilePath = this.getNodeParameter('remoteFilePath', itemIndex) as string;
+          const binaryPropertyName = this.getNodeParameter('binaryPropertyName', itemIndex) as string;
+          const content = await this.helpers.getBinaryDataBuffer(itemIndex, binaryPropertyName);
+          const uploadResult = await client.uploadFile(remoteFilePath, content);
+
+          results.push({
+            json: {
+              status: 'success',
+              operation,
+              timestamp: new Date().toISOString(),
+              remoteFilePath,
+              sizeBytes: uploadResult.sizeBytes,
+              durationMs: uploadResult.durationMs,
+            },
+          });
+          continue;
+        }
+
+        if (operation === 'delete') {
+          const deletePath = this.getNodeParameter('deletePath', itemIndex) as string;
+          const deleteType = this.getNodeParameter('deleteType', itemIndex) as 'file' | 'directory';
+
+          await client.deletePath(deletePath, deleteType === 'directory');
+
+          results.push({
+            json: {
+              status: 'success',
+              operation,
+              timestamp: new Date().toISOString(),
+              deletePath,
+              deleteType,
+            },
+          });
+          continue;
+        }
+
+        if (operation === 'move') {
+          const sourcePath = this.getNodeParameter('sourcePath', itemIndex) as string;
+          const destinationPath = this.getNodeParameter('destinationPath', itemIndex) as string;
+
+          await client.movePath(sourcePath, destinationPath);
+
+          results.push({
+            json: {
+              status: 'success',
+              operation,
+              timestamp: new Date().toISOString(),
+              sourcePath,
+              destinationPath,
+            },
+          });
+          continue;
+        }
+
+        const remoteDirectory = this.getNodeParameter('remoteDirectory', itemIndex) as string;
         const listedFiles = await client.listFiles(remoteDirectory, {
           recursive: options.recursive,
         });
 
+        if (operation === 'list') {
+          const filesAfterSize = listedFiles.filter((file) => passSizeFilter(file.size, options.maxFileSizeMB));
+          const selectedFiles =
+            options.maxFilesCount > 0 ? filesAfterSize.slice(0, options.maxFilesCount) : filesAfterSize;
+
+          const listedAsOutput = selectedFiles.map((file) => toDownloadedFileListOnly(file, remoteDirectory));
+          const output: SftpDownloadOutput = {
+            status: selectedFiles.length === 0 ? 'empty' : 'success',
+            timestamp: new Date().toISOString(),
+            directory: remoteDirectory,
+            summary: buildSummary(listedFiles, listedAsOutput, true),
+            files: listedAsOutput,
+            errors: [],
+            warnings: [],
+          };
+
+          results.push({ json: output as unknown as IDataObject });
+          continue;
+        }
+
+        const downloadMode = this.getNodeParameter('downloadMode', itemIndex) as 'all' | 'filtered';
         const filterEngine = buildFilterEngine(this, downloadMode, itemIndex);
         const eligibleByPattern = filterEngine.filter(listedFiles);
 
