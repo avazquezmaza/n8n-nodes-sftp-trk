@@ -274,25 +274,30 @@ export class SftpClient {
 
       if (isDir) {
         if (opts.includeDirectories) {
-          acc.push(this.toRemoteFileInfo(entry));
+          acc.push(this.toRemoteFileInfo(entry, dir));
         }
         if (opts.recursive) {
           const subDir = `${dir}/${entry.name}`;
           await this.listRecursive(subDir, opts, acc);
         }
       } else {
-        acc.push(this.toRemoteFileInfo(entry));
+        acc.push(this.toRemoteFileInfo(entry, dir));
       }
     }
   }
 
-  private toRemoteFileInfo(entry: SftpClientLib.FileInfo): RemoteFileInfo {
+  private toRemoteFileInfo(entry: SftpClientLib.FileInfo, parentDir: string): RemoteFileInfo {
+    const remotePath = path.posix.join(parentDir, entry.name);
+
     return {
       filename: entry.name,
       size: entry.size,
       modifyTime: entry.modifyTime,
       isDirectory: entry.type === 'd',
       longname: (entry as unknown as { longname?: string }).longname,
+      attrs: {
+        remotePath,
+      },
     };
   }
 

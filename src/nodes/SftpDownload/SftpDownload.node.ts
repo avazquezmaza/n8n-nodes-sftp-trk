@@ -1,6 +1,5 @@
 import path from 'path';
 import {
-  IBinaryData,
   IDataObject,
   IExecuteFunctions,
   INodeExecutionData,
@@ -41,6 +40,8 @@ interface NodeRuntimeOptions {
   maxFilesCount: number;
   fileTimeoutSeconds: number;
   skipErrors: boolean;
+  downloadInParallel: boolean;
+  maxConcurrentReads: number;
   preservePathStructure: boolean;
 }
 
@@ -54,6 +55,8 @@ function parseOptions(ctx: IExecuteFunctions, itemIndex: number): NodeRuntimeOpt
     maxFilesCount: Number(rawOptions.maxFilesCount ?? 0),
     fileTimeoutSeconds: Number(rawOptions.fileTimeoutSeconds ?? 120),
     skipErrors: Boolean(rawOptions.skipErrors ?? true),
+    downloadInParallel: Boolean(rawOptions.downloadInParallel ?? false),
+    maxConcurrentReads: Math.max(1, Number(rawOptions.maxConcurrentReads ?? 3)),
     preservePathStructure: Boolean(rawOptions.preservePathStructure ?? false),
   };
 }
@@ -136,10 +139,13 @@ function toDownloadedFile(
   downloadTimeMs: number,
   metadata?: Record<string, unknown>
 ): DownloadedFile {
+  const filePath =
+    (file.attrs?.remotePath as string | undefined) ?? path.posix.join(remoteDirectory, file.filename);
+
   return {
     id: uuidv4(),
     fileName: file.filename,
-    filePath: path.posix.join(remoteDirectory, file.filename),
+    filePath,
     size: file.size,
     sizeHuman: toHumanSize(file.size),
     extension: path.extname(file.filename),
@@ -152,10 +158,13 @@ function toDownloadedFile(
 }
 
 function toDownloadedFileListOnly(file: RemoteFileInfo, remoteDirectory: string): DownloadedFile {
+  const filePath =
+    (file.attrs?.remotePath as string | undefined) ?? path.posix.join(remoteDirectory, file.filename);
+
   return {
     id: uuidv4(),
     fileName: file.filename,
-    filePath: path.posix.join(remoteDirectory, file.filename),
+    filePath,
     size: file.size,
     sizeHuman: toHumanSize(file.size),
     extension: path.extname(file.filename),
@@ -201,6 +210,25 @@ function resolveStatus(processedFilesCount: number, errorsCount: number): NodeSt
   return 'success';
 }
 
+async function runWithConcurrency<T>(
+  inputs: T[],
+  maxConcurrency: number,
+  worker: (input: T, index: number) => Promise<void>
+): Promise<void> {
+  const concurrency = Math.max(1, maxConcurrency);
+  let nextIndex = 0;
+
+  const runners = Array.from({ length: Math.min(concurrency, inputs.length) }).map(async () => {
+    while (nextIndex < inputs.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      await worker(inputs[currentIndex], currentIndex);
+    }
+  });
+
+  await Promise.all(runners);
+}
+
 export class SftpDownload implements INodeType {
   description: INodeTypeDescription = {
     displayName: 'SFTP Download TRK',
@@ -228,11 +256,39 @@ export class SftpDownload implements INodeType {
         default: 'download',
         options: [
           { name: 'List Folder Content', value: 'list' },
-          { name: 'Download a File Set', value: 'download' },
+          { name: 'Download a File', value: 'download' },
           { name: 'Upload a File', value: 'upload' },
           { name: 'Delete a File or Folder', value: 'delete' },
           { name: 'Rename / Move a File or Folder', value: 'move' },
         ],
+      },
+      {
+        displayName: 'Path',
+        name: 'path',
+        type: 'string',
+        default: '/exports/file.txt',
+        required: true,
+        description: 'Absolute remote path on the SFTP server',
+        displayOptions: {
+          show: {
+            operation: ['list', 'download', 'upload', 'delete'],
+          },
+        },
+      },
+      {
+        displayName: 'Download Type',
+        name: 'downloadType',
+        type: 'options',
+        default: 'singleFile',
+        options: [
+          { name: 'Single File', value: 'singleFile' },
+          { name: 'Directory Set (Advanced)', value: 'directorySet' },
+        ],
+        displayOptions: {
+          show: {
+            operation: ['download'],
+          },
+        },
       },
       {
         displayName: 'Remote Directory',
@@ -243,7 +299,8 @@ export class SftpDownload implements INodeType {
         description: 'Absolute remote directory path on the SFTP server',
         displayOptions: {
           show: {
-            operation: ['list', 'download'],
+            operation: ['download'],
+            downloadType: ['directorySet'],
           },
         },
       },
@@ -255,12 +312,26 @@ export class SftpDownload implements INodeType {
         displayOptions: {
           show: {
             operation: ['download'],
+            downloadType: ['directorySet'],
           },
         },
         options: [
           { name: 'All Files', value: 'all' },
           { name: 'Filtered', value: 'filtered' },
         ],
+      },
+      {
+        displayName: 'Put Output File in Field',
+        name: 'outputBinaryField',
+        type: 'string',
+        default: 'data',
+        required: true,
+        description: 'Binary property name used to store downloaded file content',
+        displayOptions: {
+          show: {
+            operation: ['download'],
+          },
+        },
       },
       {
         displayName: 'Filter Type',
@@ -270,6 +341,7 @@ export class SftpDownload implements INodeType {
         displayOptions: {
           show: {
             operation: ['download'],
+            downloadType: ['directorySet'],
             downloadMode: ['filtered'],
           },
         },
@@ -287,6 +359,7 @@ export class SftpDownload implements INodeType {
         displayOptions: {
           show: {
             operation: ['download'],
+            downloadType: ['directorySet'],
             downloadMode: ['filtered'],
             filterType: ['extension'],
           },
@@ -300,6 +373,7 @@ export class SftpDownload implements INodeType {
         displayOptions: {
           show: {
             operation: ['download'],
+            downloadType: ['directorySet'],
             downloadMode: ['filtered'],
             filterType: ['pattern'],
           },
@@ -317,6 +391,7 @@ export class SftpDownload implements INodeType {
         displayOptions: {
           show: {
             operation: ['download'],
+            downloadType: ['directorySet'],
             downloadMode: ['filtered'],
             filterType: ['pattern'],
           },
@@ -330,6 +405,7 @@ export class SftpDownload implements INodeType {
         displayOptions: {
           show: {
             operation: ['download'],
+            downloadType: ['directorySet'],
             downloadMode: ['filtered'],
             filterType: ['pattern'],
           },
@@ -345,26 +421,14 @@ export class SftpDownload implements INodeType {
         displayOptions: {
           show: {
             operation: ['download'],
+            downloadType: ['directorySet'],
             downloadMode: ['filtered'],
             filterType: ['multiPattern'],
           },
         },
       },
       {
-        displayName: 'Remote File Path',
-        name: 'remoteFilePath',
-        type: 'string',
-        default: '/exports/file.txt',
-        required: true,
-        description: 'Absolute remote file path',
-        displayOptions: {
-          show: {
-            operation: ['upload'],
-          },
-        },
-      },
-      {
-        displayName: 'Binary Property',
+        displayName: 'Input Binary Field',
         name: 'binaryPropertyName',
         type: 'string',
         default: 'data',
@@ -373,19 +437,6 @@ export class SftpDownload implements INodeType {
         displayOptions: {
           show: {
             operation: ['upload'],
-          },
-        },
-      },
-      {
-        displayName: 'Delete Path',
-        name: 'deletePath',
-        type: 'string',
-        default: '/exports/file.txt',
-        required: true,
-        description: 'Absolute remote path to delete',
-        displayOptions: {
-          show: {
-            operation: ['delete'],
           },
         },
       },
@@ -476,6 +527,32 @@ export class SftpDownload implements INodeType {
             default: 120,
           },
           {
+            displayName: 'Download in Parallel',
+            name: 'downloadInParallel',
+            type: 'boolean',
+            default: false,
+            description: 'Enable concurrent reads when downloading directory sets',
+            displayOptions: {
+              show: {
+                operation: ['download'],
+                downloadType: ['directorySet'],
+              },
+            },
+          },
+          {
+            displayName: 'Max Concurrent Reads',
+            name: 'maxConcurrentReads',
+            type: 'number',
+            default: 3,
+            description: 'Maximum number of files downloaded simultaneously',
+            displayOptions: {
+              show: {
+                operation: ['download'],
+                downloadType: ['directorySet'],
+              },
+            },
+          },
+          {
             displayName: 'Skip Errors',
             name: 'skipErrors',
             type: 'boolean',
@@ -522,9 +599,10 @@ export class SftpDownload implements INodeType {
         });
 
         await client.connect();
+        const sftpClient = client;
 
         if (operation === 'upload') {
-          const remoteFilePath = this.getNodeParameter('remoteFilePath', itemIndex) as string;
+          const remoteFilePath = this.getNodeParameter('path', itemIndex) as string;
           const binaryPropertyName = this.getNodeParameter('binaryPropertyName', itemIndex) as string;
           const content = await this.helpers.getBinaryDataBuffer(itemIndex, binaryPropertyName);
           const uploadResult = await client.uploadFile(remoteFilePath, content);
@@ -543,7 +621,7 @@ export class SftpDownload implements INodeType {
         }
 
         if (operation === 'delete') {
-          const deletePath = this.getNodeParameter('deletePath', itemIndex) as string;
+          const deletePath = this.getNodeParameter('path', itemIndex) as string;
           const deleteType = this.getNodeParameter('deleteType', itemIndex) as 'file' | 'directory';
 
           await client.deletePath(deletePath, deleteType === 'directory');
@@ -578,8 +656,42 @@ export class SftpDownload implements INodeType {
           continue;
         }
 
-        const remoteDirectory = this.getNodeParameter('remoteDirectory', itemIndex) as string;
-        const listedFiles = await client.listFiles(remoteDirectory, {
+        if (operation === 'download') {
+          const downloadType = this.getNodeParameter('downloadType', itemIndex) as
+            | 'singleFile'
+            | 'directorySet';
+          const outputBinaryField = this.getNodeParameter('outputBinaryField', itemIndex) as string;
+
+          if (downloadType === 'singleFile') {
+            const remoteFilePath = this.getNodeParameter('path', itemIndex) as string;
+            const fileName = path.posix.basename(remoteFilePath);
+            const download = await sftpClient.downloadFile(remoteFilePath);
+            const binaryData = await this.helpers.prepareBinaryData(download.content, fileName);
+
+            results.push({
+              json: {
+                status: 'success',
+                operation,
+                timestamp: new Date().toISOString(),
+                path: remoteFilePath,
+                fileName,
+                sizeBytes: download.sizeBytes,
+                durationMs: download.durationMs,
+                binaryField: outputBinaryField,
+              },
+              binary: {
+                [outputBinaryField]: binaryData,
+              },
+            });
+            continue;
+          }
+        }
+
+        const remoteDirectory =
+          operation === 'list'
+            ? (this.getNodeParameter('path', itemIndex) as string)
+            : (this.getNodeParameter('remoteDirectory', itemIndex) as string);
+        const listedFiles = await sftpClient.listFiles(remoteDirectory, {
           recursive: options.recursive,
         });
 
@@ -604,6 +716,7 @@ export class SftpDownload implements INodeType {
         }
 
         const downloadMode = this.getNodeParameter('downloadMode', itemIndex) as 'all' | 'filtered';
+        const outputBinaryField = this.getNodeParameter('outputBinaryField', itemIndex) as string;
         const filterEngine = buildFilterEngine(this, downloadMode, itemIndex);
         const eligibleByPattern = filterEngine.filter(listedFiles);
 
@@ -619,32 +732,54 @@ export class SftpDownload implements INodeType {
         const warnings: StructuredWarning[] = [];
         const errors: StructuredError[] = [];
         const downloadedFiles: DownloadedFile[] = [];
-        const binaryPayload: Record<string, IBinaryData> = {};
+        const downloadItems: Array<INodeExecutionData | null> = new Array(selectedFiles.length).fill(null);
 
         if (options.listOnly) {
-          for (const file of selectedFiles) {
-            downloadedFiles.push(toDownloadedFileListOnly(file, remoteDirectory));
-          }
+          selectedFiles.forEach((file, idx) => {
+            const listed = toDownloadedFileListOnly(file, remoteDirectory);
+            downloadedFiles.push(listed);
+            downloadItems[idx] = {
+              json: {
+                status: 'success',
+                operation,
+                directory: remoteDirectory,
+                file: listed,
+              },
+            };
+          });
         } else {
-          for (const file of selectedFiles) {
+          const downloadWorker = async (file: RemoteFileInfo, index: number): Promise<void> => {
             try {
-              const fullRemotePath = path.posix.join(remoteDirectory, file.filename);
-              const download = await client.downloadFile(fullRemotePath);
-              const binaryPropertyName = `file_${downloadedFiles.length}`;
-              binaryPayload[binaryPropertyName] = await this.helpers.prepareBinaryData(
+              const fullRemotePath =
+                (file.attrs?.remotePath as string | undefined) ??
+                path.posix.join(remoteDirectory, file.filename);
+              const download = await sftpClient.downloadFile(fullRemotePath);
+              const binaryData = await this.helpers.prepareBinaryData(
                 download.content,
                 file.filename,
               );
 
-              downloadedFiles.push(
-                toDownloadedFile(file, remoteDirectory, download.durationMs, {
-                  binaryPropertyName,
-                })
-              );
+              const downloaded = toDownloadedFile(file, remoteDirectory, download.durationMs, {
+                binaryPropertyName: outputBinaryField,
+              });
+              downloadedFiles.push(downloaded);
+              downloadItems[index] = {
+                json: {
+                  status: 'success',
+                  operation,
+                  directory: remoteDirectory,
+                  file: downloaded,
+                },
+                binary: {
+                  [outputBinaryField]: binaryData,
+                },
+              };
             } catch (error: unknown) {
               const structured = transformError(error instanceof Error ? error : String(error), {
                 affectedFile: file.filename,
-                affectedFilePath: path.posix.join(remoteDirectory, file.filename),
+                affectedFilePath:
+                  (file.attrs?.remotePath as string | undefined) ??
+                  path.posix.join(remoteDirectory, file.filename),
                 attemptedOperation: 'downloadFile',
               });
 
@@ -656,6 +791,14 @@ export class SftpDownload implements INodeType {
               if (!options.skipErrors) {
                 throw new Error(`${structured.errorCode}: ${structured.message}`);
               }
+            }
+          };
+
+          if (options.downloadInParallel) {
+            await runWithConcurrency(selectedFiles, options.maxConcurrentReads, downloadWorker);
+          } else {
+            for (let i = 0; i < selectedFiles.length; i++) {
+              await downloadWorker(selectedFiles[i], i);
             }
           }
         }
@@ -673,29 +816,34 @@ export class SftpDownload implements INodeType {
           logWarning(logger, 'Files skipped by size limit', { skippedBySize });
         }
 
-        const summary = buildSummary(listedFiles, downloadedFiles, options.listOnly);
-        const status = resolveStatus(downloadedFiles.length, errors.length);
+        const producedItems = downloadItems.filter((item): item is INodeExecutionData => item !== null);
 
-        const output: SftpDownloadOutput = {
-          status,
-          timestamp: new Date().toISOString(),
-          directory: remoteDirectory,
-          summary,
-          files: downloadedFiles,
-          errors,
-          warnings,
-        };
+        if (producedItems.length > 0) {
+          results.push(...producedItems);
+        } else {
+          const summary = buildSummary(listedFiles, downloadedFiles, options.listOnly);
+          const status = resolveStatus(downloadedFiles.length, errors.length);
+
+          const output: SftpDownloadOutput = {
+            status,
+            timestamp: new Date().toISOString(),
+            directory: remoteDirectory,
+            summary,
+            files: downloadedFiles,
+            errors,
+            warnings,
+          };
+
+          results.push({
+            json: output as unknown as IDataObject,
+          });
+        }
 
         logEvent(logger, {
           event: errors.length ? LogEvent.EXECUTION_FAILED : LogEvent.EXECUTION_COMPLETED,
           remoteDirectory,
           totalFilesFound: listedFiles.length,
           totalFilesProcessed: downloadedFiles.length,
-        });
-
-        results.push({
-          json: output as unknown as IDataObject,
-          ...(Object.keys(binaryPayload).length > 0 ? { binary: binaryPayload } : {}),
         });
       } catch (error: unknown) {
         const structured = transformError(error instanceof Error ? error : String(error), {
