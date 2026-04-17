@@ -270,7 +270,7 @@ export class SftpDownload implements INodeType {
         displayName: 'Path',
         name: 'path',
         type: 'string',
-        default: '/exports/file.txt',
+        default: '/',
         required: true,
         description: 'Absolute remote path on the SFTP server',
         displayOptions: {
@@ -298,7 +298,7 @@ export class SftpDownload implements INodeType {
         displayName: 'Remote Directory',
         name: 'remoteDirectory',
         type: 'string',
-        default: '/exports',
+        default: '/',
         required: true,
         description: 'Absolute remote directory path on the SFTP server',
         displayOptions: {
@@ -476,7 +476,7 @@ export class SftpDownload implements INodeType {
         displayName: 'Source Path',
         name: 'sourcePath',
         type: 'string',
-        default: '/exports/source.txt',
+        default: '/source.txt',
         required: true,
         description: 'Current remote path',
         displayOptions: {
@@ -489,7 +489,7 @@ export class SftpDownload implements INodeType {
         displayName: 'Destination Path',
         name: 'destinationPath',
         type: 'string',
-        default: '/exports/destination.txt',
+        default: '/destination.txt',
         required: true,
         description: 'New remote path',
         displayOptions: {

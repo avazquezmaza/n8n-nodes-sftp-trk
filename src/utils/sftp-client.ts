@@ -274,8 +274,8 @@ export class SftpClient {
     try {
       entries = await this.client.list(dir);
     } catch (err: unknown) {
-      const structured = transformError(toError(err));
-      throw new Error(`${structured.errorCode}: ${structured.message}`);
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`LIST_FAILED: ${message}`);
     }
 
     for (const entry of entries) {
