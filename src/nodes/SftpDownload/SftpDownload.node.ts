@@ -208,6 +208,7 @@ export class SftpDownload implements INodeType {
     group: ['transform'],
     version: 1,
     description: 'Securely download files from SFTP with advanced filters',
+    icon: 'fa:folder-open',
     defaults: {
       name: 'SFTP Download TRK',
     },
