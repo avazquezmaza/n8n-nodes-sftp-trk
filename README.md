@@ -9,6 +9,47 @@ Community node package for n8n that downloads files from SFTP with secure valida
 
 ## Installation
 
+### Install From Git on Server
+
+Use this when your package is not published to npm and you want to install directly from your Git repository.
+
+1. Set repository and ref (branch, tag, or commit):
+
+```bash
+REPO_URL="https://github.com/avazquezmaza/n8n-nodes-sftp-trk.git"
+REPO_REF="main"
+```
+
+2. Install in `n8n` (main):
+
+```bash
+docker exec -u node -it n8n sh -lc "cd /home/node/.n8n && npm install git+${REPO_URL}#${REPO_REF} --no-audit --no-fund"
+```
+
+3. Install in `n8n-worker`:
+
+```bash
+docker exec -u node -it n8n-worker sh -lc "cd /home/node/.n8n && npm install git+${REPO_URL}#${REPO_REF} --no-audit --no-fund"
+```
+
+4. Restart services:
+
+```bash
+docker compose restart n8n n8n-worker
+```
+
+5. Verify on both containers:
+
+```bash
+docker exec -u node -it n8n sh -lc "cd /home/node/.n8n && npm ls n8n-nodes-sftp-trk"
+docker exec -u node -it n8n-worker sh -lc "cd /home/node/.n8n && npm ls n8n-nodes-sftp-trk"
+```
+
+Notes:
+- Install in both `n8n` and `n8n-worker` when using queue mode.
+- Avoid `--ignore-scripts`; this package uses `prepare` to build artifacts.
+- For immutable deployments, prefer a tag or commit hash instead of `main`.
+
 ### Docker (recommended)
 
 This project is designed to run in Docker-based n8n deployments, including queue mode (`n8n` + `n8n-worker`).
@@ -82,10 +123,26 @@ Then open n8n UI, hard-refresh the browser (`Ctrl+Shift+R`), and search for `SFT
 - Credential included in this package: `SFTP TRK`
 - Supported operations:
   - `List Folder Content`
-  - `Download a File Set`
+  - `Download a File`
   - `Upload a File`
   - `Delete a File or Folder`
   - `Rename / Move a File or Folder`
+
+### Download Behavior
+
+The `Download a File` operation supports two modes:
+
+1. `Single File` (official-like default)
+- Uses `Path` as the remote file path.
+- Stores the downloaded binary in `Put Output File in Field`.
+- Returns one output item.
+
+2. `Directory Set (Advanced)`
+- Uses `Remote Directory` and `Download Mode` (`All Files` or `Filtered`).
+- Supports `Filter Type` (`Extension`, `Pattern`, `Multi Pattern (JSON)`).
+- Supports parallel download with `Download in Parallel` and `Max Concurrent Reads`.
+- Can run as list-only with `Options -> List Only`.
+- Returns one output item per processed file when files are produced.
 
 ## Architecture
 
@@ -144,18 +201,45 @@ This package is organized in layers to keep security and maintainability clear.
 
 ## Execution Flow
 
-1. Node loads runtime parameters.
-2. Node loads credential `SFTP TRK` from n8n.
-3. Node connects to SFTP.
-4. Node lists files in `remoteDirectory`.
-5. Node applies filter rules and size limits.
-6. Node downloads selected files (unless `listOnly=true`).
-7. Node returns structured JSON output and attaches downloaded files as n8n binary data.
-8. Node closes the SFTP connection in a `finally` block.
+1. Node loads runtime parameters and `SFTP TRK` credentials.
+2. Node connects to SFTP.
+3. Node executes by operation:
+- `List Folder Content`: list by `Path`, apply optional recursive/size/count constraints, return structured list output.
+- `Download a File` + `Single File`: download exact `Path`, attach binary to configured output field.
+- `Download a File` + `Directory Set (Advanced)`: list `Remote Directory`, apply filters and limits, download sequentially or in parallel, return per-file items.
+- `Upload a File`: read input binary field and upload to `Path`.
+- `Delete a File or Folder`: remove target `Path`.
+- `Rename / Move a File or Folder`: move from `Source Path` to `Destination Path`.
+4. Node closes SFTP connection in a `finally` block.
 
 ## Output Contract
 
-The node returns one item with this shape:
+Output depends on the selected operation.
+
+### Download - Single File
+
+Returns one item with JSON metadata and one binary property in `Put Output File in Field`.
+
+Example JSON:
+
+```json
+{
+  "status": "success",
+  "operation": "download",
+  "timestamp": "ISO-8601",
+  "path": "/exports/file.txt",
+  "fileName": "file.txt",
+  "sizeBytes": 12345,
+  "durationMs": 150,
+  "binaryField": "data"
+}
+```
+
+### Download - Directory Set (Advanced)
+
+If files are produced, returns one item per file. Each item includes file metadata plus binary content in `Put Output File in Field`.
+
+If no file is produced (for example, only errors/skips), returns a summary item:
 
 ```json
 {
@@ -176,7 +260,13 @@ The node returns one item with this shape:
 }
 ```
 
-When files are downloaded, the same item also contains one or more binary properties like `file_0`, `file_1`, and so on. Each file entry in `json.files` includes the related `binaryPropertyName` in its metadata.
+### List Folder Content
+
+Returns one summary item with listed files in `json.files` (list-only metadata, no binary payload).
+
+### Upload / Delete / Rename-Move
+
+Returns one success/error metadata item per input with operation-specific fields.
 
 ## Security Notes
 

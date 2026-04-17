@@ -47,10 +47,12 @@ interface NodeRuntimeOptions {
 
 function parseOptions(ctx: IExecuteFunctions, itemIndex: number): NodeRuntimeOptions {
   const rawOptions = ctx.getNodeParameter('options', itemIndex, {}) as IDataObject;
+  const recursiveTopLevel = ctx.getNodeParameter('recursive', itemIndex, false) as boolean;
 
   return {
     listOnly: Boolean(rawOptions.listOnly ?? false),
-    recursive: Boolean(rawOptions.recursive ?? false),
+    // Backward compatible: keep honoring legacy value stored in options.recursive.
+    recursive: recursiveTopLevel || Boolean(rawOptions.recursive ?? false),
     maxFileSizeMB: Number(rawOptions.maxFileSizeMB ?? 0),
     maxFilesCount: Number(rawOptions.maxFilesCount ?? 0),
     fileTimeoutSeconds: Number(rawOptions.fileTimeoutSeconds ?? 120),
@@ -334,6 +336,18 @@ export class SftpDownload implements INodeType {
         },
       },
       {
+        displayName: 'Recursive',
+        name: 'recursive',
+        type: 'boolean',
+        default: false,
+        description: 'Whether to recursively scan subdirectories',
+        displayOptions: {
+          show: {
+            operation: ['list'],
+          },
+        },
+      },
+      {
         displayName: 'Filter Type',
         name: 'filterType',
         type: 'options',
@@ -504,7 +518,13 @@ export class SftpDownload implements INodeType {
             name: 'recursive',
             type: 'boolean',
             default: false,
-            description: 'Recursively scan subdirectories',
+            description: 'Recursively scan subdirectories (advanced download mode)',
+            displayOptions: {
+              show: {
+                operation: ['download'],
+                downloadType: ['directorySet'],
+              },
+            },
           },
           {
             displayName: 'Max File Size (MB)',
