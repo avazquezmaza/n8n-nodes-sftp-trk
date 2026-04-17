@@ -260,6 +260,10 @@ export class SftpClient {
     opts: ListFilesOptions,
     acc: RemoteFileInfo[]
   ): Promise<void> {
+    if (opts.maxEntries && opts.maxEntries > 0 && acc.length >= opts.maxEntries) {
+      return;
+    }
+
     let entries: SftpClientLib.FileInfo[];
 
     try {
@@ -270,6 +274,10 @@ export class SftpClient {
     }
 
     for (const entry of entries) {
+      if (opts.maxEntries && opts.maxEntries > 0 && acc.length >= opts.maxEntries) {
+        return;
+      }
+
       const isDir = entry.type === 'd';
 
       if (isDir) {
@@ -279,6 +287,10 @@ export class SftpClient {
         if (opts.recursive) {
           const subDir = `${dir}/${entry.name}`;
           await this.listRecursive(subDir, opts, acc);
+
+          if (opts.maxEntries && opts.maxEntries > 0 && acc.length >= opts.maxEntries) {
+            return;
+          }
         }
       } else {
         acc.push(this.toRemoteFileInfo(entry, dir));

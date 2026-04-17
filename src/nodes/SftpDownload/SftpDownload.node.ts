@@ -340,10 +340,10 @@ export class SftpDownload implements INodeType {
         name: 'recursive',
         type: 'boolean',
         default: false,
-        description: 'Whether to recursively scan subdirectories',
+        description: 'Enable or disable recursive scan (applies to List and Directory Set download)',
         displayOptions: {
           show: {
-            operation: ['list'],
+            operation: ['list', 'download'],
           },
         },
       },
@@ -512,19 +512,6 @@ export class SftpDownload implements INodeType {
             type: 'boolean',
             default: false,
             description: 'If enabled, only list files and do not download content',
-          },
-          {
-            displayName: 'Recursive',
-            name: 'recursive',
-            type: 'boolean',
-            default: false,
-            description: 'Recursively scan subdirectories (advanced download mode)',
-            displayOptions: {
-              show: {
-                operation: ['download'],
-                downloadType: ['directorySet'],
-              },
-            },
           },
           {
             displayName: 'Max File Size (MB)',
@@ -713,6 +700,7 @@ export class SftpDownload implements INodeType {
             : (this.getNodeParameter('remoteDirectory', itemIndex) as string);
         const listedFiles = await sftpClient.listFiles(remoteDirectory, {
           recursive: options.recursive,
+          maxEntries: options.maxFilesCount > 0 ? options.maxFilesCount : undefined,
         });
 
         if (operation === 'list') {
