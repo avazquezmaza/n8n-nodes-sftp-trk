@@ -36,6 +36,7 @@ import { LogEvent } from '../../types/common.types';
 interface NodeRuntimeOptions {
   listOnly: boolean;
   recursive: boolean;
+  listOutputFormat: 'official' | 'detailed';
   maxFileSizeMB: number;
   maxFilesCount: number;
   fileTimeoutSeconds: number;
@@ -53,6 +54,8 @@ function parseOptions(ctx: IExecuteFunctions, itemIndex: number): NodeRuntimeOpt
     listOnly: Boolean(rawOptions.listOnly ?? false),
     // Backward compatible: keep honoring legacy value stored in options.recursive.
     recursive: recursiveTopLevel || Boolean(rawOptions.recursive ?? false),
+    listOutputFormat:
+      (rawOptions.listOutputFormat as 'official' | 'detailed' | undefined) ?? 'official',
     maxFileSizeMB: Number(rawOptions.maxFileSizeMB ?? 0),
     maxFilesCount: Number(rawOptions.maxFilesCount ?? 0),
     fileTimeoutSeconds: Number(rawOptions.fileTimeoutSeconds ?? 120),
@@ -510,6 +513,23 @@ export class SftpDownload implements INodeType {
         },
         options: [
           {
+            displayName: 'List Output Format',
+            name: 'listOutputFormat',
+            type: 'options',
+            default: 'official',
+            options: [
+              {
+                name: 'Official Style (One Item per File)',
+                value: 'official',
+              },
+              {
+                name: 'Detailed Summary (TRK)',
+                value: 'detailed',
+              },
+            ],
+            description: 'Defines output shape used by List operation',
+          },
+          {
             displayName: 'List Only',
             name: 'listOnly',
             type: 'boolean',
@@ -698,6 +718,37 @@ export class SftpDownload implements INodeType {
           const filesAfterSize = listedFiles.filter((file) => passSizeFilter(file.size, options.maxFileSizeMB));
           const selectedFiles =
             options.maxFilesCount > 0 ? filesAfterSize.slice(0, options.maxFilesCount) : filesAfterSize;
+
+          if (options.listOutputFormat === 'official') {
+            for (const file of selectedFiles) {
+              const remotePath =
+                (file.attrs?.remotePath as string | undefined) ??
+                path.posix.join(remoteDirectory, file.filename);
+
+              results.push({
+                json: {
+                  name: file.filename,
+                  path: remotePath,
+                  type: file.isDirectory ? 'directory' : 'file',
+                  size: file.size,
+                  modifyTime: file.modifyTime,
+                  modifiedAt: new Date(file.modifyTime).toISOString(),
+                },
+              });
+            }
+
+            if (selectedFiles.length === 0) {
+              results.push({
+                json: {
+                  status: 'empty',
+                  directory: remoteDirectory,
+                  totalFilesFound: 0,
+                },
+              });
+            }
+
+            continue;
+          }
 
           const listedAsOutput = selectedFiles.map((file) => toDownloadedFileListOnly(file, remoteDirectory));
           const output: SftpDownloadOutput = {
