@@ -80,5 +80,13 @@ export class SftpTrk implements ICredentialType {
         },
       },
     },
+    {
+      displayName: 'Allowed Base Path',
+      name: 'allowedBasePath',
+      type: 'string',
+      default: '/',
+      description:
+        'Restrict remote paths to this base directory. Use / to allow any absolute path, or set /exports, /deliveries, etc.',
+    },
   ];
 }

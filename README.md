@@ -274,7 +274,20 @@ Returns one success/error metadata item per input with operation-specific fields
 - The SFTP credential is packaged with the node, so installation does not depend on external credential definitions.
 - Sensitive values are redacted in logs.
 - Remote paths are validated before SFTP operations.
+- Path validation is restricted by credential field `Allowed Base Path`.
+  - Use `/` to allow any absolute remote path.
+  - Use a specific base such as `/exports` or `/deliveries` to enforce directory boundaries.
 - Pattern validation includes ReDoS safety checks.
+
+## Troubleshooting
+
+If you get:
+
+`INVALID_PATH: Path is outside allowed directory`
+
+Edit your `SFTP TRK` credential and set `Allowed Base Path` to match your SFTP layout, for example:
+- `/deliveries` for paths like `/deliveries/licenses/...`
+- `/` to allow any absolute path
 
 ## Development
 

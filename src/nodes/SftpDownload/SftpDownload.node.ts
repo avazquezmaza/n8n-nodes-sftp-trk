@@ -84,6 +84,7 @@ function toSftpCredential(data: IDataObject): SftpCredential {
   const password = toOptionalString(data.password);
   const privateKey = toOptionalString(data.privateKey ?? data.privatekey);
   const passphrase = toOptionalString(data.passphrase);
+  const allowedBasePath = toOptionalString(data.allowedBasePath);
   const port = toOptionalNumber(data.port);
 
   return {
@@ -93,6 +94,7 @@ function toSftpCredential(data: IDataObject): SftpCredential {
     password,
     privateKey,
     passphrase,
+    allowedBasePath,
     authMethod: privateKey ? 'key' : 'password',
   };
 }
@@ -340,7 +342,8 @@ export class SftpDownload implements INodeType {
         name: 'recursive',
         type: 'boolean',
         default: false,
-        description: 'Enable or disable recursive scan (applies to List and Directory Set download)',
+        description:
+          'Whether to return objects representing all directories and files recursively found within the SFTP server path',
         displayOptions: {
           show: {
             operation: ['list', 'download'],

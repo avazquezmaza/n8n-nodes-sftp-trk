@@ -135,6 +135,7 @@ function buildConnectConfig(
 export class SftpClient {
   private readonly client: SftpClientLib;
   private readonly options: Required<SftpClientOptions>;
+  private readonly allowedBasePath: string;
   private connected = false;
 
   constructor(
@@ -142,6 +143,10 @@ export class SftpClient {
     options: SftpClientOptions = {}
   ) {
     this.client = new SftpClientLib();
+    this.allowedBasePath =
+      typeof credential.allowedBasePath === 'string' && credential.allowedBasePath.trim().startsWith('/')
+        ? credential.allowedBasePath.trim()
+        : '/';
     this.options = {
       connectTimeoutMs: options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
       fileTimeoutMs: options.fileTimeoutMs ?? DEFAULT_FILE_TIMEOUT_MS,
@@ -233,7 +238,7 @@ export class SftpClient {
     this.assertConnected();
 
     // Security validation — rejects path traversal attempts
-    validateRemotePath(remotePath);
+    validateRemotePath(remotePath, this.allowedBasePath);
 
     const logger = getLogger();
     logger.debug({ remoteDirectory: remotePath, event: LogEvent.FILE_LISTED }, 'Listing remote directory');
@@ -330,7 +335,7 @@ export class SftpClient {
 
     // Security: validate each path before attempting download
     const parentDir = path.dirname(remotePath);
-    validateRemotePath(parentDir);
+    validateRemotePath(parentDir, this.allowedBasePath);
 
     const filename = path.basename(remotePath);
     const dlLogger = getLogger();
@@ -398,7 +403,7 @@ export class SftpClient {
     this.assertConnected();
 
     const parentDir = path.dirname(remotePath);
-    validateRemotePath(parentDir);
+    validateRemotePath(parentDir, this.allowedBasePath);
 
     const fileName = path.basename(remotePath);
     const startTime = Date.now();
@@ -437,7 +442,7 @@ export class SftpClient {
   async deletePath(remotePath: string, isDirectory = false): Promise<void> {
     this.assertConnected();
 
-    validateRemotePath(remotePath);
+    validateRemotePath(remotePath, this.allowedBasePath);
 
     try {
       if (isDirectory) {
@@ -465,8 +470,8 @@ export class SftpClient {
   async movePath(sourcePath: string, destinationPath: string): Promise<void> {
     this.assertConnected();
 
-    validateRemotePath(sourcePath);
-    validateRemotePath(path.dirname(destinationPath));
+    validateRemotePath(sourcePath, this.allowedBasePath);
+    validateRemotePath(path.dirname(destinationPath), this.allowedBasePath);
 
     try {
       await this.client.rename(sourcePath, destinationPath);

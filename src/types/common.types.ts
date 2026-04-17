@@ -260,4 +260,5 @@ export interface SftpCredential {
   privateKey?: string;
   passphrase?: string;
   authMethod?: 'key' | 'password';
+  allowedBasePath?: string;
 }
