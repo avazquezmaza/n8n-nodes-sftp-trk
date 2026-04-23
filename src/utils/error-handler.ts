@@ -131,6 +131,17 @@ const ERROR_MAPPINGS: Record<string, ErrorMapping> = {
     severity: 'error',
     retryable: false,
   },
+
+  // ssh2-sftp-client list failures often surface as:
+  // `list: /path /path` or `list: /path <server message>`
+  'list:': {
+    code: ErrorCode.SFTP_OPERATION_FAILED,
+    userMessage: 'Unable to list remote directory — path may not exist, may not be a directory, or access is restricted',
+    supportMessage:
+      'SFTP list operation failed. Verify the target path exists, is a directory, and the user has read permissions.',
+    severity: 'error',
+    retryable: false,
+  },
 };
 
 /**

@@ -61,6 +61,17 @@ describe('transformError', () => {
 
       expect(result.errorCode).toBe(ErrorCode.TIMEOUT);
     });
+
+    it('should map ssh2 list errors to SFTP_OPERATION_FAILED', () => {
+      const error = new Error(
+        'list: /licenses/usa_vx30 /licenses/usa_vx30 (directory: /licenses/usa_vx30)'
+      );
+      const result = transformError(error);
+
+      expect(result.errorCode).toBe(ErrorCode.SFTP_OPERATION_FAILED);
+      expect(result.message).toContain('Unable to list remote directory');
+      expect(result.context?.supportMessage).toBeDefined();
+    });
   });
 
   describe('❌ Unknown Errors', () => {

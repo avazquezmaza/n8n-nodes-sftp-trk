@@ -808,6 +808,15 @@ describe('error handling and lifecycle', () => {
     expect(mockDisconnect).toHaveBeenCalledTimes(1);
   });
 
+  it('rethrows transformed error code for list failures when continueOnFail is false', async () => {
+    mockListFiles.mockRejectedValueOnce(
+      new Error('list: /licenses/usa_vx30 /licenses/usa_vx30')
+    );
+
+    const ctx = buildMockCtx({ operation: 'list', continueOnFail: false });
+    await expect(node.execute.call(ctx)).rejects.toThrow('SFTP_OPERATION_FAILED');
+  });
+
   it('processes each input item with an independent SFTP connection', async () => {
     mockListFiles.mockResolvedValue([makeFile('file.csv')]);
 

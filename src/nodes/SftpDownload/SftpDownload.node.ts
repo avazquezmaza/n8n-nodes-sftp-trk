@@ -910,12 +910,13 @@ export class SftpDownload implements INodeType {
               status: 'error',
               message: structured.message,
               errorCode: structured.errorCode,
+              errorDetails: structured.context,
             },
           });
           continue;
         }
 
-        throw error;
+        throw new Error(`${structured.errorCode}: ${structured.message}`);
       } finally {
         if (client) await client.disconnect();
       }
