@@ -140,15 +140,8 @@ function toHumanSize(size: number): string {
   return `${(size / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-function toDownloadedFile(
-  file: RemoteFileInfo,
-  remoteDirectory: string,
-  downloadTimeMs: number,
-  metadata?: Record<string, unknown>
-): DownloadedFile {
-  const filePath =
-    (file.attrs?.remotePath as string | undefined) ?? path.posix.join(remoteDirectory, file.filename);
-
+function fileInfoBase(file: RemoteFileInfo, remoteDirectory: string) {
+  const filePath = file.attrs?.remotePath ?? path.posix.join(remoteDirectory, file.filename);
   return {
     id: uuidv4(),
     fileName: file.filename,
@@ -157,6 +150,17 @@ function toDownloadedFile(
     sizeHuman: toHumanSize(file.size),
     extension: path.extname(file.filename),
     modifiedAt: new Date(file.modifyTime).toISOString(),
+  };
+}
+
+function toDownloadedFile(
+  file: RemoteFileInfo,
+  remoteDirectory: string,
+  downloadTimeMs: number,
+  metadata?: Record<string, unknown>
+): DownloadedFile {
+  return {
+    ...fileInfoBase(file, remoteDirectory),
     downloadStatus: 'success',
     downloadedAt: new Date().toISOString(),
     downloadTimeMs,
@@ -165,17 +169,8 @@ function toDownloadedFile(
 }
 
 function toDownloadedFileListOnly(file: RemoteFileInfo, remoteDirectory: string): DownloadedFile {
-  const filePath =
-    (file.attrs?.remotePath as string | undefined) ?? path.posix.join(remoteDirectory, file.filename);
-
   return {
-    id: uuidv4(),
-    fileName: file.filename,
-    filePath,
-    size: file.size,
-    sizeHuman: toHumanSize(file.size),
-    extension: path.extname(file.filename),
-    modifiedAt: new Date(file.modifyTime).toISOString(),
+    ...fileInfoBase(file, remoteDirectory),
     downloadStatus: 'skipped',
     skipReason: 'listOnly mode enabled',
     downloadTimeMs: 0,
@@ -235,6 +230,258 @@ async function runWithConcurrency<T>(
 
   await Promise.all(runners);
 }
+
+// ---------------------------------------------------------------------------
+// Operation handlers
+// ---------------------------------------------------------------------------
+
+async function handleUpload(
+  ctx: IExecuteFunctions,
+  itemIndex: number,
+  client: SftpClient
+): Promise<INodeExecutionData> {
+  const remoteFilePath = ctx.getNodeParameter('path', itemIndex) as string;
+  const binaryPropertyName = ctx.getNodeParameter('binaryPropertyName', itemIndex) as string;
+  const content = await ctx.helpers.getBinaryDataBuffer(itemIndex, binaryPropertyName);
+  const result = await client.uploadFile(remoteFilePath, content);
+  return {
+    json: {
+      status: 'success',
+      operation: 'upload',
+      timestamp: new Date().toISOString(),
+      remoteFilePath,
+      sizeBytes: result.sizeBytes,
+      durationMs: result.durationMs,
+    },
+  };
+}
+
+async function handleDelete(
+  ctx: IExecuteFunctions,
+  itemIndex: number,
+  client: SftpClient
+): Promise<INodeExecutionData> {
+  const deletePath = ctx.getNodeParameter('path', itemIndex) as string;
+  const deleteType = ctx.getNodeParameter('deleteType', itemIndex) as 'file' | 'directory';
+  await client.deletePath(deletePath, deleteType === 'directory');
+  return {
+    json: {
+      status: 'success',
+      operation: 'delete',
+      timestamp: new Date().toISOString(),
+      deletePath,
+      deleteType,
+    },
+  };
+}
+
+async function handleMove(
+  ctx: IExecuteFunctions,
+  itemIndex: number,
+  client: SftpClient
+): Promise<INodeExecutionData> {
+  const sourcePath = ctx.getNodeParameter('sourcePath', itemIndex) as string;
+  const destinationPath = ctx.getNodeParameter('destinationPath', itemIndex) as string;
+  await client.movePath(sourcePath, destinationPath);
+  return {
+    json: {
+      status: 'success',
+      operation: 'move',
+      timestamp: new Date().toISOString(),
+      sourcePath,
+      destinationPath,
+    },
+  };
+}
+
+async function handleSingleFileDownload(
+  ctx: IExecuteFunctions,
+  itemIndex: number,
+  client: SftpClient,
+  outputBinaryField: string
+): Promise<INodeExecutionData> {
+  const remoteFilePath = ctx.getNodeParameter('path', itemIndex) as string;
+  const fileName = path.posix.basename(remoteFilePath);
+  const download = await client.downloadFile(remoteFilePath);
+  const binaryData = await ctx.helpers.prepareBinaryData(download.content, fileName);
+  return {
+    json: {
+      status: 'success',
+      operation: 'download',
+      timestamp: new Date().toISOString(),
+      path: remoteFilePath,
+      fileName,
+      sizeBytes: download.sizeBytes,
+      durationMs: download.durationMs,
+      binaryField: outputBinaryField,
+    },
+    binary: { [outputBinaryField]: binaryData },
+  };
+}
+
+async function handleList(
+  ctx: IExecuteFunctions,
+  itemIndex: number,
+  client: SftpClient,
+  options: NodeRuntimeOptions
+): Promise<INodeExecutionData[]> {
+  const remoteDirectory = ctx.getNodeParameter('path', itemIndex) as string;
+  const listedFiles = await client.listFiles(remoteDirectory, {
+    recursive: options.recursive,
+    maxEntries: options.maxFilesCount > 0 ? options.maxFilesCount : undefined,
+  });
+
+  const filesAfterSize = listedFiles.filter((file) => passSizeFilter(file.size, options.maxFileSizeMB));
+  const selectedFiles =
+    options.maxFilesCount > 0 ? filesAfterSize.slice(0, options.maxFilesCount) : filesAfterSize;
+
+  if (options.listOutputFormat === 'official') {
+    if (selectedFiles.length === 0) {
+      return [{ json: { status: 'empty', directory: remoteDirectory, totalFilesFound: 0 } }];
+    }
+    return selectedFiles.map((file) => ({
+      json: {
+        name: file.filename,
+        path: file.attrs?.remotePath ?? path.posix.join(remoteDirectory, file.filename),
+        type: file.isDirectory ? 'directory' : 'file',
+        size: file.size,
+        modifyTime: file.modifyTime,
+        modifiedAt: new Date(file.modifyTime).toISOString(),
+      },
+    }));
+  }
+
+  const listedAsOutput = selectedFiles.map((file) => toDownloadedFileListOnly(file, remoteDirectory));
+  const output: SftpDownloadOutput = {
+    status: selectedFiles.length === 0 ? 'empty' : 'success',
+    timestamp: new Date().toISOString(),
+    directory: remoteDirectory,
+    summary: buildSummary(listedFiles, listedAsOutput, true),
+    files: listedAsOutput,
+    errors: [],
+    warnings: [],
+  };
+  return [{ json: output as unknown as IDataObject }];
+}
+
+async function handleDirectorySetDownload(
+  ctx: IExecuteFunctions,
+  itemIndex: number,
+  client: SftpClient,
+  options: NodeRuntimeOptions,
+  outputBinaryField: string
+): Promise<INodeExecutionData[]> {
+  const logger = getLogger('sftp-download-node');
+  const remoteDirectory = ctx.getNodeParameter('remoteDirectory', itemIndex) as string;
+  const downloadMode = ctx.getNodeParameter('downloadMode', itemIndex) as 'all' | 'filtered';
+
+  const listedFiles = await client.listFiles(remoteDirectory, {
+    recursive: options.recursive,
+    maxEntries: options.maxFilesCount > 0 ? options.maxFilesCount : undefined,
+  });
+
+  const filterEngine = buildFilterEngine(ctx, downloadMode, itemIndex);
+  const eligibleByPattern = filterEngine.filter(listedFiles);
+  const filteredBySize = eligibleByPattern.filter((file) =>
+    passSizeFilter(file.size, options.maxFileSizeMB)
+  );
+  const selectedFiles =
+    options.maxFilesCount > 0 ? filteredBySize.slice(0, options.maxFilesCount) : filteredBySize;
+
+  const warnings: StructuredWarning[] = [];
+  const errors: StructuredError[] = [];
+  const downloadedFiles: DownloadedFile[] = [];
+  const downloadItems: Array<INodeExecutionData | null> = new Array(selectedFiles.length).fill(null);
+
+  if (options.listOnly) {
+    selectedFiles.forEach((file, idx) => {
+      const listed = toDownloadedFileListOnly(file, remoteDirectory);
+      downloadedFiles.push(listed);
+      downloadItems[idx] = {
+        json: { status: 'success', operation: 'download', directory: remoteDirectory, file: listed },
+      };
+    });
+  } else {
+    const downloadWorker = async (file: RemoteFileInfo, index: number): Promise<void> => {
+      try {
+        const fullRemotePath =
+          file.attrs?.remotePath ?? path.posix.join(remoteDirectory, file.filename);
+        const download = await client.downloadFile(fullRemotePath);
+        const binaryData = await ctx.helpers.prepareBinaryData(download.content, file.filename);
+        const downloaded = toDownloadedFile(file, remoteDirectory, download.durationMs, {
+          binaryPropertyName: outputBinaryField,
+        });
+        downloadedFiles.push(downloaded);
+        downloadItems[index] = {
+          json: { status: 'success', operation: 'download', directory: remoteDirectory, file: downloaded },
+          binary: { [outputBinaryField]: binaryData },
+        };
+      } catch (error: unknown) {
+        const structured = transformError(error instanceof Error ? error : String(error), {
+          affectedFile: file.filename,
+          affectedFilePath:
+            file.attrs?.remotePath ?? path.posix.join(remoteDirectory, file.filename),
+          attemptedOperation: 'downloadFile',
+        });
+        errors.push(structured);
+        logError(logger, structured.errorCode, structured.message, { fileName: file.filename });
+        if (!options.skipErrors) {
+          throw new Error(`${structured.errorCode}: ${structured.message}`);
+        }
+      }
+    };
+
+    if (options.downloadInParallel) {
+      await runWithConcurrency(selectedFiles, options.maxConcurrentReads, downloadWorker);
+    } else {
+      for (let i = 0; i < selectedFiles.length; i++) {
+        await downloadWorker(selectedFiles[i], i);
+      }
+    }
+  }
+
+  const skippedBySize = eligibleByPattern.length - filteredBySize.length;
+  if (skippedBySize > 0) {
+    warnings.push({
+      id: uuidv4(),
+      timestamp: new Date().toISOString(),
+      severity: 'warning',
+      errorCode: ErrorCode.FILE_TOO_LARGE,
+      message: `${skippedBySize} file(s) were skipped by size limit`,
+      suggestion: 'Increase maxFileSizeMB or change filtering criteria',
+    });
+    logWarning(logger, 'Files skipped by size limit', { skippedBySize });
+  }
+
+  logEvent(logger, {
+    event: errors.length ? LogEvent.EXECUTION_FAILED : LogEvent.EXECUTION_COMPLETED,
+    remoteDirectory,
+    totalFilesFound: listedFiles.length,
+    totalFilesProcessed: downloadedFiles.length,
+  });
+
+  const producedItems = downloadItems.filter((item): item is INodeExecutionData => item !== null);
+  if (producedItems.length > 0) {
+    return producedItems;
+  }
+
+  const summary = buildSummary(listedFiles, downloadedFiles, options.listOnly);
+  const status = resolveStatus(downloadedFiles.length, errors.length);
+  const output: SftpDownloadOutput = {
+    status,
+    timestamp: new Date().toISOString(),
+    directory: remoteDirectory,
+    summary,
+    files: downloadedFiles,
+    errors,
+    warnings,
+  };
+  return [{ json: output as unknown as IDataObject }];
+}
+
+// ---------------------------------------------------------------------------
+// Node class
+// ---------------------------------------------------------------------------
 
 export class SftpDownload implements INodeType {
   description: INodeTypeDescription = {
@@ -601,6 +848,7 @@ export class SftpDownload implements INodeType {
           event: LogEvent.EXECUTION_STARTED,
           operationName: 'sftp_download_execute',
         });
+
         const operation = this.getNodeParameter('operation', itemIndex) as
           | 'list'
           | 'download'
@@ -615,286 +863,42 @@ export class SftpDownload implements INodeType {
         client = new SftpClient(credential, {
           fileTimeoutMs: Math.max(1, options.fileTimeoutSeconds) * 1000,
         });
-
         await client.connect();
-        const sftpClient = client;
 
         if (operation === 'upload') {
-          const remoteFilePath = this.getNodeParameter('path', itemIndex) as string;
-          const binaryPropertyName = this.getNodeParameter('binaryPropertyName', itemIndex) as string;
-          const content = await this.helpers.getBinaryDataBuffer(itemIndex, binaryPropertyName);
-          const uploadResult = await client.uploadFile(remoteFilePath, content);
-
-          results.push({
-            json: {
-              status: 'success',
-              operation,
-              timestamp: new Date().toISOString(),
-              remoteFilePath,
-              sizeBytes: uploadResult.sizeBytes,
-              durationMs: uploadResult.durationMs,
-            },
-          });
+          results.push(await handleUpload(this, itemIndex, client));
           continue;
         }
 
         if (operation === 'delete') {
-          const deletePath = this.getNodeParameter('path', itemIndex) as string;
-          const deleteType = this.getNodeParameter('deleteType', itemIndex) as 'file' | 'directory';
-
-          await client.deletePath(deletePath, deleteType === 'directory');
-
-          results.push({
-            json: {
-              status: 'success',
-              operation,
-              timestamp: new Date().toISOString(),
-              deletePath,
-              deleteType,
-            },
-          });
+          results.push(await handleDelete(this, itemIndex, client));
           continue;
         }
 
         if (operation === 'move') {
-          const sourcePath = this.getNodeParameter('sourcePath', itemIndex) as string;
-          const destinationPath = this.getNodeParameter('destinationPath', itemIndex) as string;
-
-          await client.movePath(sourcePath, destinationPath);
-
-          results.push({
-            json: {
-              status: 'success',
-              operation,
-              timestamp: new Date().toISOString(),
-              sourcePath,
-              destinationPath,
-            },
-          });
+          results.push(await handleMove(this, itemIndex, client));
           continue;
         }
-
-        if (operation === 'download') {
-          const downloadType = this.getNodeParameter('downloadType', itemIndex) as
-            | 'singleFile'
-            | 'directorySet';
-          const outputBinaryField = this.getNodeParameter('outputBinaryField', itemIndex) as string;
-
-          if (downloadType === 'singleFile') {
-            const remoteFilePath = this.getNodeParameter('path', itemIndex) as string;
-            const fileName = path.posix.basename(remoteFilePath);
-            const download = await sftpClient.downloadFile(remoteFilePath);
-            const binaryData = await this.helpers.prepareBinaryData(download.content, fileName);
-
-            results.push({
-              json: {
-                status: 'success',
-                operation,
-                timestamp: new Date().toISOString(),
-                path: remoteFilePath,
-                fileName,
-                sizeBytes: download.sizeBytes,
-                durationMs: download.durationMs,
-                binaryField: outputBinaryField,
-              },
-              binary: {
-                [outputBinaryField]: binaryData,
-              },
-            });
-            continue;
-          }
-        }
-
-        const remoteDirectory =
-          operation === 'list'
-            ? (this.getNodeParameter('path', itemIndex) as string)
-            : (this.getNodeParameter('remoteDirectory', itemIndex) as string);
-        const listedFiles = await sftpClient.listFiles(remoteDirectory, {
-          recursive: options.recursive,
-          maxEntries: options.maxFilesCount > 0 ? options.maxFilesCount : undefined,
-        });
 
         if (operation === 'list') {
-          const filesAfterSize = listedFiles.filter((file) => passSizeFilter(file.size, options.maxFileSizeMB));
-          const selectedFiles =
-            options.maxFilesCount > 0 ? filesAfterSize.slice(0, options.maxFilesCount) : filesAfterSize;
-
-          if (options.listOutputFormat === 'official') {
-            for (const file of selectedFiles) {
-              const remotePath =
-                (file.attrs?.remotePath as string | undefined) ??
-                path.posix.join(remoteDirectory, file.filename);
-
-              results.push({
-                json: {
-                  name: file.filename,
-                  path: remotePath,
-                  type: file.isDirectory ? 'directory' : 'file',
-                  size: file.size,
-                  modifyTime: file.modifyTime,
-                  modifiedAt: new Date(file.modifyTime).toISOString(),
-                },
-              });
-            }
-
-            if (selectedFiles.length === 0) {
-              results.push({
-                json: {
-                  status: 'empty',
-                  directory: remoteDirectory,
-                  totalFilesFound: 0,
-                },
-              });
-            }
-
-            continue;
-          }
-
-          const listedAsOutput = selectedFiles.map((file) => toDownloadedFileListOnly(file, remoteDirectory));
-          const output: SftpDownloadOutput = {
-            status: selectedFiles.length === 0 ? 'empty' : 'success',
-            timestamp: new Date().toISOString(),
-            directory: remoteDirectory,
-            summary: buildSummary(listedFiles, listedAsOutput, true),
-            files: listedAsOutput,
-            errors: [],
-            warnings: [],
-          };
-
-          results.push({ json: output as unknown as IDataObject });
+          results.push(...(await handleList(this, itemIndex, client, options)));
           continue;
         }
 
-        const downloadMode = this.getNodeParameter('downloadMode', itemIndex) as 'all' | 'filtered';
+        // operation === 'download'
+        const downloadType = this.getNodeParameter('downloadType', itemIndex) as
+          | 'singleFile'
+          | 'directorySet';
         const outputBinaryField = this.getNodeParameter('outputBinaryField', itemIndex) as string;
-        const filterEngine = buildFilterEngine(this, downloadMode, itemIndex);
-        const eligibleByPattern = filterEngine.filter(listedFiles);
 
-        const filteredBySize = eligibleByPattern.filter((file: RemoteFileInfo) =>
-          passSizeFilter(file.size, options.maxFileSizeMB)
+        if (downloadType === 'singleFile') {
+          results.push(await handleSingleFileDownload(this, itemIndex, client, outputBinaryField));
+          continue;
+        }
+
+        results.push(
+          ...(await handleDirectorySetDownload(this, itemIndex, client, options, outputBinaryField))
         );
-
-        const selectedFiles =
-          options.maxFilesCount > 0
-            ? filteredBySize.slice(0, options.maxFilesCount)
-            : filteredBySize;
-
-        const warnings: StructuredWarning[] = [];
-        const errors: StructuredError[] = [];
-        const downloadedFiles: DownloadedFile[] = [];
-        const downloadItems: Array<INodeExecutionData | null> = new Array(selectedFiles.length).fill(null);
-
-        if (options.listOnly) {
-          selectedFiles.forEach((file, idx) => {
-            const listed = toDownloadedFileListOnly(file, remoteDirectory);
-            downloadedFiles.push(listed);
-            downloadItems[idx] = {
-              json: {
-                status: 'success',
-                operation,
-                directory: remoteDirectory,
-                file: listed,
-              },
-            };
-          });
-        } else {
-          const downloadWorker = async (file: RemoteFileInfo, index: number): Promise<void> => {
-            try {
-              const fullRemotePath =
-                (file.attrs?.remotePath as string | undefined) ??
-                path.posix.join(remoteDirectory, file.filename);
-              const download = await sftpClient.downloadFile(fullRemotePath);
-              const binaryData = await this.helpers.prepareBinaryData(
-                download.content,
-                file.filename,
-              );
-
-              const downloaded = toDownloadedFile(file, remoteDirectory, download.durationMs, {
-                binaryPropertyName: outputBinaryField,
-              });
-              downloadedFiles.push(downloaded);
-              downloadItems[index] = {
-                json: {
-                  status: 'success',
-                  operation,
-                  directory: remoteDirectory,
-                  file: downloaded,
-                },
-                binary: {
-                  [outputBinaryField]: binaryData,
-                },
-              };
-            } catch (error: unknown) {
-              const structured = transformError(error instanceof Error ? error : String(error), {
-                affectedFile: file.filename,
-                affectedFilePath:
-                  (file.attrs?.remotePath as string | undefined) ??
-                  path.posix.join(remoteDirectory, file.filename),
-                attemptedOperation: 'downloadFile',
-              });
-
-              errors.push(structured);
-              logError(logger, structured.errorCode, structured.message, {
-                fileName: file.filename,
-              });
-
-              if (!options.skipErrors) {
-                throw new Error(`${structured.errorCode}: ${structured.message}`);
-              }
-            }
-          };
-
-          if (options.downloadInParallel) {
-            await runWithConcurrency(selectedFiles, options.maxConcurrentReads, downloadWorker);
-          } else {
-            for (let i = 0; i < selectedFiles.length; i++) {
-              await downloadWorker(selectedFiles[i], i);
-            }
-          }
-        }
-
-        const skippedBySize = eligibleByPattern.length - filteredBySize.length;
-        if (skippedBySize > 0) {
-          warnings.push({
-            id: uuidv4(),
-            timestamp: new Date().toISOString(),
-            severity: 'warning',
-            errorCode: ErrorCode.FILE_TOO_LARGE,
-            message: `${skippedBySize} file(s) were skipped by size limit`,
-            suggestion: 'Increase maxFileSizeMB or change filtering criteria',
-          });
-          logWarning(logger, 'Files skipped by size limit', { skippedBySize });
-        }
-
-        const producedItems = downloadItems.filter((item): item is INodeExecutionData => item !== null);
-
-        if (producedItems.length > 0) {
-          results.push(...producedItems);
-        } else {
-          const summary = buildSummary(listedFiles, downloadedFiles, options.listOnly);
-          const status = resolveStatus(downloadedFiles.length, errors.length);
-
-          const output: SftpDownloadOutput = {
-            status,
-            timestamp: new Date().toISOString(),
-            directory: remoteDirectory,
-            summary,
-            files: downloadedFiles,
-            errors,
-            warnings,
-          };
-
-          results.push({
-            json: output as unknown as IDataObject,
-          });
-        }
-
-        logEvent(logger, {
-          event: errors.length ? LogEvent.EXECUTION_FAILED : LogEvent.EXECUTION_COMPLETED,
-          remoteDirectory,
-          totalFilesFound: listedFiles.length,
-          totalFilesProcessed: downloadedFiles.length,
-        });
       } catch (error: unknown) {
         const structured = transformError(error instanceof Error ? error : String(error), {
           attemptedOperation: 'execute',
@@ -913,9 +917,7 @@ export class SftpDownload implements INodeType {
 
         throw error;
       } finally {
-        if (client) {
-          await client.disconnect();
-        }
+        if (client) await client.disconnect();
       }
     }
 

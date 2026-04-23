@@ -87,17 +87,16 @@ export function validateRemotePath(
   let normalized = inputPath.replace(/\/+/g, '/');
   normalized = normalized.replace(/\/\.(?=\/|$)/g, '');
 
-  // 5. Resolver ruta (PERO no acceder filesystem, solo lógica)
-  // Simular resolve eliminando ..
-  const parts = normalized.split('/').filter((p) => p !== '');
-  for (let i = parts.length - 1; i >= 0; i--) {
-    if (parts[i] === '..') {
-      parts.splice(i, 1);
-      if (i > 0) parts.splice(i - 1, 1);
-      i--;
+  // 5. Resolver ruta con stack (correcto para secuencias de ..)
+  const stack: string[] = [];
+  for (const part of normalized.split('/').filter((p) => p !== '' && p !== '.')) {
+    if (part === '..') {
+      stack.pop();
+    } else {
+      stack.push(part);
     }
   }
-  const resolved = '/' + parts.join('/');
+  const resolved = '/' + stack.join('/');
 
   // 6. Validar que esté dentro de basePath permitido
   if (basePath !== '/' && !resolved.startsWith(basePath)) {
@@ -316,8 +315,8 @@ export function validateSftpCredential(credential: unknown): void {
 
   const cred = credential as Record<string, unknown>;
 
-  if (!cred.host || typeof cred.host !== 'string') {
-    throw new Error(`${ErrorCode.INVALID_PARAMETERS}: Credential must have valid host`);
+  if (!cred.host || typeof cred.host !== 'string' || (cred.host as string).trim().length === 0) {
+    throw new Error(`${ErrorCode.INVALID_PARAMETERS}: Credential must have valid non-empty host`);
   }
 
   if (cred.port !== undefined) {

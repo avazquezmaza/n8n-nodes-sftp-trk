@@ -134,7 +134,7 @@ export interface RemoteFileInfo {
   modifyTime: number;
   isDirectory?: boolean;
   longname?: string;
-  attrs?: Record<string, unknown>;
+  attrs?: { remotePath: string };
 }
 
 /**

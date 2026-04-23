@@ -344,10 +344,14 @@ export class SftpClient {
 
     let content: Buffer;
     let timeoutHandle: NodeJS.Timeout | undefined;
+    let timedOut = false;
 
     try {
       const timeoutPromise = new Promise<never>((_, reject) => {
-        timeoutHandle = setTimeout(() => reject(new Error(`Timed out: Download timed out for ${filename}`)), this.options.fileTimeoutMs);
+        timeoutHandle = setTimeout(() => {
+          timedOut = true;
+          reject(new Error(`Timed out: Download timed out for ${filename}`));
+        }, this.options.fileTimeoutMs);
         timeoutHandle.unref?.();
       });
 
@@ -356,14 +360,16 @@ export class SftpClient {
         timeoutPromise,
       ]);
     } catch (err: unknown) {
-      const errStructured = transformError(toError(err));
-      logError(getLogger(), errStructured.errorCode, errStructured.message, { fileName: filename });
-      const structured = errStructured;
+      if (timedOut) {
+        // Force-close the session so the abandoned client.get() promise is aborted
+        try { await this.client.end(); } catch { /* ignore cleanup errors */ }
+        this.connected = false;
+      }
+      const structured = transformError(toError(err));
+      logError(getLogger(), structured.errorCode, structured.message, { fileName: filename });
       throw new Error(`${structured.errorCode}: ${structured.message}`);
     } finally {
-      if (timeoutHandle) {
-        clearTimeout(timeoutHandle);
-      }
+      if (timeoutHandle) clearTimeout(timeoutHandle);
     }
 
     const durationMs = Date.now() - startTime;

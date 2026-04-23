@@ -41,14 +41,14 @@ export interface FilterSummary {
  */
 export class FilterEngine {
   private readonly patterns: FilterPattern[];
+  private readonly compiledRegexes = new Map<string, RegExp>();
 
   constructor(patterns: FilterPattern[] = []) {
-    // Validar todos los patrones en construcción
     for (const p of patterns) {
       if (p.patternType === 'glob') {
         validateGlobPattern(p.pattern);
       } else {
-        validateRegexPattern(p.pattern);
+        this.compiledRegexes.set(p.pattern, validateRegexPattern(p.pattern));
       }
     }
     this.patterns = patterns;
@@ -150,10 +150,8 @@ export class FilterEngine {
   private matches(filename: string, rule: FilterPattern): boolean {
     if (rule.patternType === 'glob') {
       return minimatch(filename, rule.pattern, { nocase: false, dot: false });
-    } else {
-      const regex = validateRegexPattern(rule.pattern);
-      return regex.test(filename);
     }
+    return this.compiledRegexes.get(rule.pattern)!.test(filename);
   }
 }
 
