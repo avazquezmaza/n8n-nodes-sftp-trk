@@ -274,8 +274,13 @@ export class SftpClient {
     try {
       entries = await this.client.list(dir);
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      throw new Error(`LIST_FAILED: ${message}`);
+      // Preserve the original error class so transformError can classify it.
+      // Append the directory to make the problem immediately identifiable.
+      if (err instanceof Error) {
+        err.message = `${err.message} (directory: ${dir})`;
+        throw err;
+      }
+      throw new Error(`Failed to list directory ${dir}: ${String(err)}`);
     }
 
     for (const entry of entries) {

@@ -81,3 +81,37 @@ Strict mode is enabled (`noImplicitAny`, `strictNullChecks`, `noUnusedLocals`). 
 ## Testing
 
 Jest runs from `src/` with `ts-jest`. 80% coverage is enforced on branches, functions, lines, and statements — the build will fail if coverage drops. Unit tests live in `src/__tests__/unit/`, one file per utility module.
+
+Test files by layer:
+- `sftp-download-node.test.ts` — node routing, all operations, error handling, credential parsing
+- `sftp-client.test.ts` — connect/retry/disconnect/list/download
+- `filter-engine.test.ts` — glob, regex, multi-pattern, size filter
+- `validators.test.ts` — path traversal, ReDoS, size limits
+- `error-handler.test.ts` — error mapping and sanitization
+- `logger.test.ts` — redaction and structured output
+
+## Production server (Docker queue mode)
+
+Container names: `n8n-n8n-1` (main) · `n8n-n8n-worker-1` (worker).
+
+Both containers mount the same `n8n_data` volume at `/home/node/.n8n`. Installing once on `n8n-n8n-1` is sufficient.
+
+**Critical path:** n8n reads community nodes from `N8N_CUSTOM_EXTENSIONS=/home/node/.n8n/nodes/node_modules`. Always install with `cd /home/node/.n8n/nodes`, not `cd /home/node/.n8n` — wrong path causes the `packages are missing` warning.
+
+**Deploy / update:**
+
+```bash
+docker exec -u node -it n8n-n8n-1 sh -lc \
+  "cd /home/node/.n8n/nodes && npm install git+https://github.com/avazquezmaza/n8n-nodes-sftp-trk.git#main --no-audit --no-fund"
+
+docker restart n8n-n8n-1 n8n-n8n-worker-1
+```
+
+**Verify after restart:**
+
+```bash
+docker exec n8n-n8n-1 node -e \
+  'require("/home/node/.n8n/nodes/node_modules/n8n-nodes-sftp-trk/dist/nodes/SftpDownload/SftpDownload.node.js"); console.log("OK")'
+
+docker logs n8n-n8n-1 --since 2m 2>&1 | grep -Ei "packages are missing|sftp"
+```

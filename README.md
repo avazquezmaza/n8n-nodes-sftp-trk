@@ -152,41 +152,66 @@ The package is organized in layers:
 
 ## Deployment on n8n server
 
+### Environment layout
+
+The production server uses Docker queue mode with these containers:
+
+| Container | Role |
+|---|---|
+| `n8n-n8n-1` | n8n main process |
+| `n8n-n8n-worker-1` | n8n worker |
+
+Both containers mount the **same** `n8n_data` volume at `/home/node/.n8n`, so installing once on `n8n-n8n-1` is enough.
+
+Key environment variables set in the containers:
+
+```
+N8N_COMMUNITY_PACKAGES_ENABLED=true
+N8N_CUSTOM_EXTENSIONS=/home/node/.n8n/nodes/node_modules
+```
+
+**Critical:** n8n loads community nodes from `/home/node/.n8n/nodes/node_modules/`, not from `/home/node/.n8n/node_modules/`. Always install with `cd /home/node/.n8n/nodes`.
+
+---
+
 ### Install from Git
 
 Use this when the package is not published to npm.
 
-**Step 1 — Set variables:**
+**Step 1 — Push changes to Git:**
 
 ```bash
-REPO_URL="https://github.com/avazquezmaza/n8n-nodes-sftp-trk.git"
-REPO_REF="main"   # or a tag like v1.2.0 for immutable installs
+git push origin main
 ```
 
-**Step 2 — Install in both containers** (required in queue mode):
+**Step 2 — Install on the main container** (shared volume propagates to worker automatically):
 
 ```bash
-docker exec -u node -it n8n sh -lc \
-  "cd /home/node/.n8n && npm install git+${REPO_URL}#${REPO_REF} --no-audit --no-fund"
-
-docker exec -u node -it n8n-worker sh -lc \
-  "cd /home/node/.n8n && npm install git+${REPO_URL}#${REPO_REF} --no-audit --no-fund"
+docker exec -u node -it n8n-n8n-1 sh -lc \
+  "cd /home/node/.n8n/nodes && npm install git+https://github.com/avazquezmaza/n8n-nodes-sftp-trk.git#main --no-audit --no-fund"
 ```
 
 > Do not use `--ignore-scripts`. This package compiles with the `prepare` script.
 
-**Step 3 — Restart services:**
+**Step 3 — Restart both containers:**
 
 ```bash
-docker compose restart n8n n8n-worker
+docker restart n8n-n8n-1 n8n-n8n-worker-1
 ```
 
 **Step 4 — Verify:**
 
 ```bash
-docker exec -u node -it n8n sh -lc "cd /home/node/.n8n && npm ls n8n-nodes-sftp-trk"
+# Package is visible in the correct path
+docker exec -u node n8n-n8n-1 sh -lc \
+  "cd /home/node/.n8n/nodes && npm ls n8n-nodes-sftp-trk"
+
+# Node file loads without errors
 docker exec n8n-n8n-1 node -e \
-  'require("/home/node/.n8n/node_modules/n8n-nodes-sftp-trk/dist/nodes/SftpDownload/SftpDownload.node.js"); console.log("OK")'
+  'require("/home/node/.n8n/nodes/node_modules/n8n-nodes-sftp-trk/dist/nodes/SftpDownload/SftpDownload.node.js"); console.log("OK")'
+
+# No "packages are missing" warning in logs
+docker logs n8n-n8n-1 --since 2m 2>&1 | grep -Ei "packages are missing|error|sftp"
 ```
 
 Open n8n UI, hard-refresh (`Ctrl+Shift+R`), and search for **SFTP Download TRK** in the node picker.
@@ -196,16 +221,19 @@ Open n8n UI, hard-refresh (`Ctrl+Shift+R`), and search for **SFTP Download TRK**
 ### Update to a new version
 
 ```bash
-REPO_URL="https://github.com/avazquezmaza/n8n-nodes-sftp-trk.git"
-REPO_REF="main"   # or a specific tag/commit
+docker exec -u node -it n8n-n8n-1 sh -lc \
+  "cd /home/node/.n8n/nodes && npm install git+https://github.com/avazquezmaza/n8n-nodes-sftp-trk.git#main --no-audit --no-fund"
 
-docker exec -u node -it n8n sh -lc \
-  "cd /home/node/.n8n && npm install git+${REPO_URL}#${REPO_REF} --no-audit --no-fund"
+docker restart n8n-n8n-1 n8n-n8n-worker-1
+```
 
-docker exec -u node -it n8n-worker sh -lc \
-  "cd /home/node/.n8n && npm install git+${REPO_URL}#${REPO_REF} --no-audit --no-fund"
+For a specific tag or commit (recommended for production stability):
 
-docker compose restart n8n n8n-worker
+```bash
+docker exec -u node -it n8n-n8n-1 sh -lc \
+  "cd /home/node/.n8n/nodes && npm install git+https://github.com/avazquezmaza/n8n-nodes-sftp-trk.git#v1.0.1 --no-audit --no-fund"
+
+docker restart n8n-n8n-1 n8n-n8n-worker-1
 ```
 
 ---
@@ -234,7 +262,7 @@ volumes:
 After editing `docker-compose.yml`:
 
 ```bash
-cd /docker/n8n && docker compose up -d --force-recreate n8n n8n-worker
+docker compose up -d --force-recreate n8n-n8n-1 n8n-n8n-worker-1
 ```
 
 ---
@@ -242,10 +270,15 @@ cd /docker/n8n && docker compose up -d --force-recreate n8n n8n-worker
 ### Diagnosing install issues
 
 ```bash
-# Check the node file exists
-docker exec n8n-n8n-1 sh -c \
-  "ls /home/node/.n8n/nodes/node_modules/n8n-nodes-sftp-trk/dist/nodes/SftpDownload/"
+# Confirm package is in the right path
+docker exec n8n-n8n-1 ls \
+  /home/node/.n8n/nodes/node_modules/n8n-nodes-sftp-trk/dist/nodes/SftpDownload/
 
-# Check for load errors in recent logs
-docker logs n8n-n8n-1 --since 3m 2>&1 | grep -Ei "packages are missing|error"
+# Check n8n environment (verify N8N_CUSTOM_EXTENSIONS path)
+docker exec n8n-n8n-1 env | grep -Ei "N8N_CUSTOM|N8N_COMMUNITY"
+
+# Check for load errors
+docker logs n8n-n8n-1 --since 3m 2>&1 | grep -Ei "packages are missing|error|sftp"
 ```
+
+**Common mistake:** installing with `cd /home/node/.n8n` instead of `cd /home/node/.n8n/nodes` places the package where n8n cannot find it, causing the `packages are missing` warning even though the file is importable.

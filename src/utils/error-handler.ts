@@ -112,6 +112,25 @@ const ERROR_MAPPINGS: Record<string, ErrorMapping> = {
     severity: 'error',
     retryable: false,
   },
+
+  // ssh2-sftp-client generic SFTP failure (SSH_FX_FAILURE, status code 4)
+  // Triggered when the server rejects the operation: path does not exist as a
+  // directory, wrong type (file vs dir), or access is denied at the protocol level.
+  'An unexpected error occurred': {
+    code: ErrorCode.SFTP_OPERATION_FAILED,
+    userMessage: 'SFTP operation failed — path may not exist, may not be a directory, or access is restricted',
+    supportMessage: 'SSH_FX_FAILURE (code 4) from server. Check that the remote path exists and is accessible.',
+    severity: 'error',
+    retryable: false,
+  },
+
+  'No such file': {
+    code: ErrorCode.FILE_NOT_FOUND,
+    userMessage: 'Remote path not found',
+    supportMessage: 'Server returned "No such file or directory". Verify the path exists on the SFTP server.',
+    severity: 'error',
+    retryable: false,
+  },
 };
 
 /**
@@ -163,10 +182,8 @@ export function transformError(
     context: {
       attemptedOperation: context?.attemptedOperation,
       retryable: mapping.retryable,
-      ...(process.env.NODE_ENV !== 'production' && { 
-        supportMessage: mapping.supportMessage,
-        rawError: errorMessage 
-      }),
+      supportMessage: mapping.supportMessage,
+      rawError: errorMessage,
     },
   };
 }
