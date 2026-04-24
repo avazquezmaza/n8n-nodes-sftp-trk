@@ -413,7 +413,7 @@ async function handleDirectorySetDownload(
         ? Math.min(options.maxConcurrentReads, selectedFiles.length)
         : 0;
 
-    // Pre-allocate so the finally can always iterate the array even if connect() throws.
+    // Worker 0 reuses the primary connected client to avoid an extra handshake.
     const parallelClients: Array<SftpClient | undefined> = new Array(parallelConcurrency);
 
     const downloadWorker = async (
@@ -451,10 +451,12 @@ async function handleDirectorySetDownload(
     };
 
     try {
-      // Assign before connect so the finally block can disconnect even on partial failure.
       if (parallelConcurrency > 0) {
+        parallelClients[0] = client;
+
         await Promise.all(
-          Array.from({ length: parallelConcurrency }, async (_, workerId) => {
+          Array.from({ length: Math.max(0, parallelConcurrency - 1) }, async (_, offset) => {
+            const workerId = offset + 1;
             const workerClient = new SftpClient(credential, clientOptions);
             parallelClients[workerId] = workerClient;
             await workerClient.connect();
@@ -470,7 +472,14 @@ async function handleDirectorySetDownload(
         }
       }
     } finally {
-      await Promise.all(parallelClients.map((c) => c?.disconnect()));
+      await Promise.all(
+        parallelClients.map(async (parallelClient, workerId) => {
+          // Primary client (worker 0) is disconnected at execute() level.
+          if (parallelClient && workerId > 0) {
+            await parallelClient.disconnect();
+          }
+        })
+      );
     }
   }
 
