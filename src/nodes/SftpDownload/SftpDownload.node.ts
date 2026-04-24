@@ -30,7 +30,7 @@ import {
 } from '../../utils/filter-engine';
 import { transformError } from '../../utils/error-handler';
 import { getLogger, logError, logEvent, logWarning } from '../../utils/logger';
-import { SftpClient } from '../../utils/sftp-client';
+import { SftpClient, SftpClientOptions } from '../../utils/sftp-client';
 import { LogEvent } from '../../types/common.types';
 
 interface NodeRuntimeOptions {
@@ -215,18 +215,22 @@ function resolveStatus(processedFilesCount: number, errorsCount: number): NodeSt
 async function runWithConcurrency<T>(
   inputs: T[],
   maxConcurrency: number,
-  worker: (input: T, index: number) => Promise<void>
+  worker: (input: T, index: number, workerId: number) => Promise<void>
 ): Promise<void> {
   const concurrency = Math.max(1, maxConcurrency);
   let nextIndex = 0;
 
-  const runners = Array.from({ length: Math.min(concurrency, inputs.length) }).map(async () => {
-    while (nextIndex < inputs.length) {
-      const currentIndex = nextIndex;
-      nextIndex += 1;
-      await worker(inputs[currentIndex], currentIndex);
-    }
-  });
+  const runners = Array.from(
+    { length: Math.min(concurrency, inputs.length) },
+    (_, workerId) =>
+      (async () => {
+        while (nextIndex < inputs.length) {
+          const currentIndex = nextIndex;
+          nextIndex += 1;
+          await worker(inputs[currentIndex], currentIndex, workerId);
+        }
+      })()
+  );
 
   await Promise.all(runners);
 }
@@ -368,6 +372,8 @@ async function handleDirectorySetDownload(
   ctx: IExecuteFunctions,
   itemIndex: number,
   client: SftpClient,
+  credential: SftpCredential,
+  clientOptions: SftpClientOptions,
   options: NodeRuntimeOptions,
   outputBinaryField: string
 ): Promise<INodeExecutionData[]> {
@@ -402,11 +408,24 @@ async function handleDirectorySetDownload(
       };
     });
   } else {
-    const downloadWorker = async (file: RemoteFileInfo, index: number): Promise<void> => {
+    const parallelConcurrency =
+      options.downloadInParallel && options.maxConcurrentReads > 1
+        ? Math.min(options.maxConcurrentReads, selectedFiles.length)
+        : 0;
+
+    // Pre-allocate so the finally can always iterate the array even if connect() throws.
+    const parallelClients: Array<SftpClient | undefined> = new Array(parallelConcurrency);
+
+    const downloadWorker = async (
+      file: RemoteFileInfo,
+      index: number,
+      workerId: number
+    ): Promise<void> => {
       try {
+        const activeClient = parallelClients[workerId] ?? client;
         const fullRemotePath =
           file.attrs?.remotePath ?? path.posix.join(remoteDirectory, file.filename);
-        const download = await client.downloadFile(fullRemotePath);
+        const download = await activeClient.downloadFile(fullRemotePath);
         const binaryData = await ctx.helpers.prepareBinaryData(download.content, file.filename);
         const downloaded = toDownloadedFile(file, remoteDirectory, download.durationMs, {
           binaryPropertyName: outputBinaryField,
@@ -431,12 +450,27 @@ async function handleDirectorySetDownload(
       }
     };
 
-    if (options.downloadInParallel) {
-      await runWithConcurrency(selectedFiles, options.maxConcurrentReads, downloadWorker);
-    } else {
-      for (let i = 0; i < selectedFiles.length; i++) {
-        await downloadWorker(selectedFiles[i], i);
+    try {
+      // Assign before connect so the finally block can disconnect even on partial failure.
+      if (parallelConcurrency > 0) {
+        await Promise.all(
+          Array.from({ length: parallelConcurrency }, async (_, workerId) => {
+            const workerClient = new SftpClient(credential, clientOptions);
+            parallelClients[workerId] = workerClient;
+            await workerClient.connect();
+          })
+        );
       }
+
+      if (options.downloadInParallel) {
+        await runWithConcurrency(selectedFiles, options.maxConcurrentReads, downloadWorker);
+      } else {
+        for (let i = 0; i < selectedFiles.length; i++) {
+          await downloadWorker(selectedFiles[i], i, 0);
+        }
+      }
+    } finally {
+      await Promise.all(parallelClients.map((c) => c?.disconnect()));
     }
   }
 
@@ -859,10 +893,11 @@ export class SftpDownload implements INodeType {
 
         const credentialsData = await this.getCredentials('sftpTrk');
         const credential = toSftpCredential(credentialsData as IDataObject);
-
-        client = new SftpClient(credential, {
+        const clientOptions: SftpClientOptions = {
           fileTimeoutMs: Math.max(1, options.fileTimeoutSeconds) * 1000,
-        });
+        };
+
+        client = new SftpClient(credential, clientOptions);
         await client.connect();
 
         if (operation === 'upload') {
@@ -897,7 +932,15 @@ export class SftpDownload implements INodeType {
         }
 
         results.push(
-          ...(await handleDirectorySetDownload(this, itemIndex, client, options, outputBinaryField))
+          ...(await handleDirectorySetDownload(
+            this,
+            itemIndex,
+            client,
+            credential,
+            clientOptions,
+            options,
+            outputBinaryField
+          ))
         );
       } catch (error: unknown) {
         const structured = transformError(error instanceof Error ? error : String(error), {
