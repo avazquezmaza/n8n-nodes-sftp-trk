@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import path from 'path';
 import {
   IDataObject,
@@ -100,6 +101,36 @@ function toSftpCredential(data: IDataObject): SftpCredential {
     allowedBasePath,
     authMethod: privateKey ? 'key' : 'password',
   };
+}
+
+/**
+ * Fingerprint used to reuse one SSH/SFTP session across n8n input items when credentials
+ * and effective file-timeout options match. Sensitive values are hashed; never logged.
+ */
+function buildSftpSessionKey(credential: SftpCredential, fileTimeoutSeconds: number): string {
+  const port = credential.port && credential.port > 0 ? credential.port : 22;
+  let authSecretFingerprint: string;
+  if (credential.authMethod === 'key') {
+    const material = `${credential.privateKey ?? ''}\0${credential.passphrase ?? ''}`;
+    authSecretFingerprint =
+      material.trim().length > 0 ? createHash('sha256').update(material).digest('hex').slice(0, 16) : 'none';
+  } else {
+    const pw = credential.password ?? '';
+    authSecretFingerprint =
+      pw.length > 0 ? createHash('sha256').update(pw).digest('hex').slice(0, 16) : 'none';
+  }
+
+  const timeout = Math.max(1, fileTimeoutSeconds);
+
+  return [
+    credential.host,
+    String(port),
+    credential.username ?? '',
+    credential.allowedBasePath ?? '',
+    credential.authMethod,
+    authSecretFingerprint,
+    String(timeout),
+  ].join('\u0001');
 }
 
 function buildFilterEngine(
@@ -883,94 +914,112 @@ export class SftpDownload implements INodeType {
     const items = this.getInputData();
     const results: INodeExecutionData[] = [];
 
-    for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
-      let client: SftpClient | null = null;
+    let pooledClient: SftpClient | null = null;
+    let pooledSessionKey: string | null = null;
 
-      try {
-        logEvent(logger, {
-          event: LogEvent.EXECUTION_STARTED,
-          operationName: 'sftp_download_execute',
-        });
-
-        const operation = this.getNodeParameter('operation', itemIndex) as
-          | 'list'
-          | 'download'
-          | 'upload'
-          | 'delete'
-          | 'move';
-        const options = parseOptions(this, itemIndex);
-
-        const credentialsData = await this.getCredentials('sftpTrk');
-        const credential = toSftpCredential(credentialsData as IDataObject);
-        const clientOptions: SftpClientOptions = {
-          fileTimeoutMs: Math.max(1, options.fileTimeoutSeconds) * 1000,
-        };
-
-        client = new SftpClient(credential, clientOptions);
-        await client.connect();
-
-        if (operation === 'upload') {
-          results.push(await handleUpload(this, itemIndex, client));
-          continue;
-        }
-
-        if (operation === 'delete') {
-          results.push(await handleDelete(this, itemIndex, client));
-          continue;
-        }
-
-        if (operation === 'move') {
-          results.push(await handleMove(this, itemIndex, client));
-          continue;
-        }
-
-        if (operation === 'list') {
-          results.push(...(await handleList(this, itemIndex, client, options)));
-          continue;
-        }
-
-        // operation === 'download'
-        const downloadType = this.getNodeParameter('downloadType', itemIndex) as
-          | 'singleFile'
-          | 'directorySet';
-        const outputBinaryField = this.getNodeParameter('outputBinaryField', itemIndex) as string;
-
-        if (downloadType === 'singleFile') {
-          results.push(await handleSingleFileDownload(this, itemIndex, client, outputBinaryField));
-          continue;
-        }
-
-        results.push(
-          ...(await handleDirectorySetDownload(
-            this,
-            itemIndex,
-            client,
-            credential,
-            clientOptions,
-            options,
-            outputBinaryField
-          ))
-        );
-      } catch (error: unknown) {
-        const structured = transformError(error instanceof Error ? error : String(error), {
-          attemptedOperation: 'execute',
-        });
-
-        if (this.continueOnFail()) {
-          results.push({
-            json: {
-              status: 'error',
-              message: structured.message,
-              errorCode: structured.errorCode,
-              errorDetails: structured.context,
-            },
+    try {
+      for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+        try {
+          logEvent(logger, {
+            event: LogEvent.EXECUTION_STARTED,
+            operationName: 'sftp_download_execute',
           });
-          continue;
-        }
 
-        throw new Error(`${structured.errorCode}: ${structured.message}`);
-      } finally {
-        if (client) await client.disconnect();
+          const operation = this.getNodeParameter('operation', itemIndex) as
+            | 'list'
+            | 'download'
+            | 'upload'
+            | 'delete'
+            | 'move';
+          const options = parseOptions(this, itemIndex);
+
+          const credentialsData = await this.getCredentials('sftpTrk');
+          const credential = toSftpCredential(credentialsData as IDataObject);
+          const sessionKey = buildSftpSessionKey(credential, options.fileTimeoutSeconds);
+          const clientOptions: SftpClientOptions = {
+            fileTimeoutMs: Math.max(1, options.fileTimeoutSeconds) * 1000,
+          };
+
+          if (sessionKey !== pooledSessionKey) {
+            if (pooledClient) {
+              await pooledClient.disconnect();
+            }
+            pooledClient = null;
+            pooledSessionKey = null;
+
+            const nextClient = new SftpClient(credential, clientOptions);
+            await nextClient.connect();
+            pooledClient = nextClient;
+            pooledSessionKey = sessionKey;
+          }
+
+          const client = pooledClient!;
+
+          if (operation === 'upload') {
+            results.push(await handleUpload(this, itemIndex, client));
+            continue;
+          }
+
+          if (operation === 'delete') {
+            results.push(await handleDelete(this, itemIndex, client));
+            continue;
+          }
+
+          if (operation === 'move') {
+            results.push(await handleMove(this, itemIndex, client));
+            continue;
+          }
+
+          if (operation === 'list') {
+            results.push(...(await handleList(this, itemIndex, client, options)));
+            continue;
+          }
+
+          // operation === 'download'
+          const downloadType = this.getNodeParameter('downloadType', itemIndex) as
+            | 'singleFile'
+            | 'directorySet';
+          const outputBinaryField = this.getNodeParameter('outputBinaryField', itemIndex) as string;
+
+          if (downloadType === 'singleFile') {
+            results.push(await handleSingleFileDownload(this, itemIndex, client, outputBinaryField));
+            continue;
+          }
+
+          results.push(
+            ...(await handleDirectorySetDownload(
+              this,
+              itemIndex,
+              client,
+              credential,
+              clientOptions,
+              options,
+              outputBinaryField
+            ))
+          );
+        } catch (error: unknown) {
+          const structured = transformError(error instanceof Error ? error : String(error), {
+            attemptedOperation: 'execute',
+          });
+
+          if (this.continueOnFail()) {
+            results.push({
+              json: {
+                status: 'error',
+                message: structured.message,
+                errorCode: structured.errorCode,
+                errorDetails: structured.context,
+              },
+            });
+            continue;
+          }
+
+          throw new Error(`${structured.errorCode}: ${structured.message}`);
+        }
+      }
+    } finally {
+      if (pooledClient) {
+        await pooledClient.disconnect();
       }
     }
 

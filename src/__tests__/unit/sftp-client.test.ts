@@ -16,12 +16,23 @@ const mockEnd = jest.fn();
 const mockList = jest.fn();
 const mockGet = jest.fn();
 
+/** When set, SftpClient uses concurrent download (downloadToBuffer) instead of get() */
+let mockSftpChannel: {
+  open: jest.Mock;
+  fstat: jest.Mock;
+  read: jest.Mock;
+  close: jest.Mock;
+} | null = null;
+
 jest.mock('ssh2-sftp-client', () => {
   return jest.fn().mockImplementation(() => ({
     connect: mockConnect,
     end: mockEnd,
     list: mockList,
     get: mockGet,
+    get sftp() {
+      return mockSftpChannel;
+    },
   }));
 });
 
@@ -69,6 +80,7 @@ const fastOptions: SftpClientOptions = {
 describe('SftpClient.connect()', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockSftpChannel = null;
     mockConnect.mockResolvedValue(undefined);
     mockEnd.mockResolvedValue(undefined);
   });
@@ -98,6 +110,15 @@ describe('SftpClient.connect()', () => {
     await client.connect();
     const callArg = mockConnect.mock.calls[0][0] as Record<string, unknown>;
     expect(callArg.port).toBe(22);
+  });
+
+  it('should include AES-first cipher list and keepalive in connect config', async () => {
+    const client = new SftpClient(validCredential, fastOptions);
+    await client.connect();
+    const callArg = mockConnect.mock.calls[0][0] as Record<string, unknown>;
+    const algorithms = callArg.algorithms as { cipher: string[] };
+    expect(algorithms.cipher[0]).toContain('aes');
+    expect(callArg.keepaliveInterval).toBe(10_000);
   });
 
   it('should use privateKey when authMethod is key', async () => {
@@ -324,6 +345,7 @@ describe('SftpClient.listFiles()', () => {
 describe('SftpClient.downloadFile()', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
+    mockSftpChannel = null;
     mockConnect.mockResolvedValue(undefined);
     mockEnd.mockResolvedValue(undefined);
   });
@@ -380,6 +402,68 @@ describe('SftpClient.downloadFile()', () => {
     await client.connect();
     await expect(client.downloadFile('/exports/../../etc/passwd')).rejects.toThrow();
   });
+
+  it('should download via concurrent SFTP reads when channel is available', async () => {
+    const handle = Buffer.from([1]);
+    const payload = Buffer.from('hello');
+    mockSftpChannel = {
+      open: jest.fn((_p: string, _f: string, cb: (e: Error | null, h?: Buffer) => void) => {
+        cb(null, handle);
+      }),
+      fstat: jest.fn((_h: Buffer, cb: (e: Error | null, s?: { size: number }) => void) => {
+        cb(null, { size: payload.length });
+      }),
+      read: jest.fn(
+        (
+          _h: Buffer,
+          out: Buffer,
+          bufOffset: number,
+          len: number,
+          _pos: number,
+          cb: (e: Error | null) => void
+        ) => {
+          payload.copy(out, bufOffset, 0, len);
+          cb(null);
+        }
+      ),
+      close: jest.fn((_h: Buffer, cb?: () => void) => {
+        cb?.();
+      }),
+    };
+
+    const client = new SftpClient(validCredential, fastOptions);
+    await client.connect();
+    const result = await client.downloadFile('/allowed/report.csv');
+
+    expect(mockGet).not.toHaveBeenCalled();
+    expect(mockSftpChannel?.open).toHaveBeenCalled();
+    expect(result.content.equals(payload)).toBe(true);
+    expect(result.sizeBytes).toBe(payload.length);
+  });
+
+  it('should resolve empty file via concurrent SFTP path', async () => {
+    const handle = Buffer.from([2]);
+    mockSftpChannel = {
+      open: jest.fn((_p: string, _f: string, cb: (e: Error | null, h?: Buffer) => void) => {
+        cb(null, handle);
+      }),
+      fstat: jest.fn((_h: Buffer, cb: (e: Error | null, s?: { size: number }) => void) => {
+        cb(null, { size: 0 });
+      }),
+      read: jest.fn(),
+      close: jest.fn((_h: Buffer, cb?: () => void) => {
+        cb?.();
+      }),
+    };
+
+    const client = new SftpClient(validCredential, fastOptions);
+    await client.connect();
+    const result = await client.downloadFile('/allowed/empty.txt');
+
+    expect(result.content.length).toBe(0);
+    expect(mockSftpChannel?.read).not.toHaveBeenCalled();
+  });
+
 });
 
 // ---------------------------------------------------------------------------

@@ -74,6 +74,8 @@ function makeDownloadResult(content = 'csv-data') {
 type MockCtxOptions = {
   operation?: string;
   path?: string;
+  /** Overrides `options` per item index when n8n calls getNodeParameter('options', idx) */
+  resolveOptionsPerItem?: (itemIndex: number) => Record<string, unknown>;
   downloadType?: string;
   remoteDirectory?: string;
   downloadMode?: string;
@@ -114,6 +116,7 @@ function buildMockCtx(params: MockCtxOptions = {}): IExecuteFunctions {
     excludePattern = '',
     multiplePatterns = [],
     options = {},
+    resolveOptionsPerItem,
     inputItems = [{ json: {} }],
     continueOnFail: cof = false,
   } = params;
@@ -141,7 +144,10 @@ function buildMockCtx(params: MockCtxOptions = {}): IExecuteFunctions {
 
   return {
     getInputData: () => inputItems,
-    getNodeParameter: (name: string, _idx: number, defaultVal?: unknown) => {
+    getNodeParameter: (name: string, itemIndex: number, defaultVal?: unknown) => {
+      if (name === 'options' && resolveOptionsPerItem) {
+        return resolveOptionsPerItem(itemIndex);
+      }
       if (name in paramMap) return paramMap[name];
       return defaultVal;
     },
@@ -244,14 +250,14 @@ describe('operation: list', () => {
     expect(results[0].json.name).toBe('small.csv');
   });
 
-  it('connects and disconnects exactly once per input item', async () => {
+  it('reuses one SFTP connection across input items when session key matches', async () => {
     mockListFiles.mockResolvedValue([]);
 
     const ctx = buildMockCtx({ operation: 'list', inputItems: [{ json: {} }, { json: {} }] });
     await node.execute.call(ctx);
 
-    expect(mockConnect).toHaveBeenCalledTimes(2);
-    expect(mockDisconnect).toHaveBeenCalledTimes(2);
+    expect(mockConnect).toHaveBeenCalledTimes(1);
+    expect(mockDisconnect).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -817,7 +823,7 @@ describe('error handling and lifecycle', () => {
     await expect(node.execute.call(ctx)).rejects.toThrow('SFTP_OPERATION_FAILED');
   });
 
-  it('processes each input item with an independent SFTP connection', async () => {
+  it('processes multiple input items without re-handshaking when session stays the same', async () => {
     mockListFiles.mockResolvedValue([makeFile('file.csv')]);
 
     const ctx = buildMockCtx({
@@ -826,8 +832,50 @@ describe('error handling and lifecycle', () => {
     });
     await node.execute.call(ctx);
 
-    expect(mockConnect).toHaveBeenCalledTimes(3);
-    expect(mockDisconnect).toHaveBeenCalledTimes(3);
+    expect(mockConnect).toHaveBeenCalledTimes(1);
+    expect(mockDisconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens a new connection when file timeout differs between items', async () => {
+    mockListFiles.mockResolvedValue([]);
+
+    const ctx = buildMockCtx({
+      operation: 'list',
+      inputItems: [{ json: {} }, { json: {} }],
+      resolveOptionsPerItem: (idx) =>
+        idx === 0 ? { fileTimeoutSeconds: 60 } : { fileTimeoutSeconds: 120 },
+    });
+
+    await node.execute.call(ctx);
+
+    expect(mockConnect).toHaveBeenCalledTimes(2);
+    expect(mockDisconnect).toHaveBeenCalledTimes(2);
+  });
+
+  it('opens a new connection when credentials host differs between items', async () => {
+    mockListFiles.mockResolvedValue([]);
+    let callIdx = 0;
+
+    const ctx = buildMockCtx({
+      operation: 'list',
+      inputItems: [{ json: {} }, { json: {} }],
+    });
+
+    const credMock = ctx.getCredentials as jest.Mock;
+    credMock.mockImplementation(async () => {
+      callIdx += 1;
+      return {
+        host: callIdx === 1 ? 'east.example.com' : 'west.example.com',
+        port: 22,
+        username: 'user',
+        password: 'secret',
+      };
+    });
+
+    await node.execute.call(ctx);
+
+    expect(mockConnect).toHaveBeenCalledTimes(2);
+    expect(mockDisconnect).toHaveBeenCalledTimes(2);
   });
 
   it('continues to next input item after error when continueOnFail is true', async () => {

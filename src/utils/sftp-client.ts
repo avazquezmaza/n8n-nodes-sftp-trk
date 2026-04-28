@@ -37,6 +37,16 @@ const DEFAULT_FILE_TIMEOUT_MS = 120_000;
 const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_DELAY_BASE_MS = 1_000;
 
+/**
+ * Target payload per SFTP READ. Smaller chunks (e.g. 32 KiB) mean many more
+ * round trips per MiB than OpenSSH-shaped servers typically allow (~256 KiB max);
+ * ssh2 splits oversized requests internally (`_maxReadLen`).
+ */
+const DOWNLOAD_PARALLEL_CHUNK_BYTES = 256 * 1024;
+
+/** Concurrent overlapping READ RPCs scheduled per large file transfer. */
+const DOWNLOAD_PARALLEL_RPCS = 64;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -101,7 +111,21 @@ function buildConnectConfig(
     port,
     username: credential.username ?? 'anonymous',
     readyTimeout: timeoutMs,
-    retries: 1, // we handle retries ourselves
+    retries: 1,
+    // Keepalive prevents the server from dropping idle connections during parallel batch downloads
+    keepaliveInterval: 10_000,
+    keepaliveCountMax: 3,
+    // Prefer AES-GCM ciphers that use hardware AES-NI acceleration over software-only chacha20
+    algorithms: {
+      cipher: [
+        'aes128-gcm@openssh.com',
+        'aes256-gcm@openssh.com',
+        'aes128-ctr',
+        'aes192-ctr',
+        'aes256-ctr',
+        'chacha20-poly1305@openssh.com',
+      ],
+    },
   };
 
   if (credential.authMethod === 'key' && credential.privateKey) {
@@ -328,17 +352,21 @@ export class SftpClient {
   // -------------------------------------------------------------------------
 
   /**
-   * Downloads a single remote file into memory.
+   * Downloads a single remote file into memory. When the raw SFTP channel is
+   * available, uses many overlapping READ requests and large chunks (see
+   * `DOWNLOAD_PARALLEL_*` constants); otherwise falls back to the library `get()`
+   * path (sequential stream), which is slower on high-latency links.
    *
-   * @param remotePath - Full remote path (directory + filename).
+   * @param remotePath    - Full remote path (directory + filename).
+   * @param timeoutOverrideMs - Optional per-call timeout that overrides the
+   *                            instance default set in the constructor.
    * @returns `DownloadResult` with the raw Buffer, byte size and duration.
    *
    * @throws on path validation failure, timeout, or SFTP error.
    */
-  async downloadFile(remotePath: string): Promise<DownloadResult> {
+  async downloadFile(remotePath: string, timeoutOverrideMs?: number): Promise<DownloadResult> {
     this.assertConnected();
 
-    // Security: validate each path before attempting download
     const parentDir = path.dirname(remotePath);
     validateRemotePath(parentDir, this.allowedBasePath);
 
@@ -346,6 +374,7 @@ export class SftpClient {
     const dlLogger = getLogger();
     logEvent(dlLogger, { event: LogEvent.FILE_DOWNLOAD_STARTED, fileName: filename });
     const startTime = Date.now();
+    const timeoutMs = timeoutOverrideMs ?? this.options.fileTimeoutMs;
 
     let content: Buffer;
     let timeoutHandle: NodeJS.Timeout | undefined;
@@ -356,18 +385,21 @@ export class SftpClient {
         timeoutHandle = setTimeout(() => {
           timedOut = true;
           reject(new Error(`Timed out: Download timed out for ${filename}`));
-        }, this.options.fileTimeoutMs);
+        }, timeoutMs);
         timeoutHandle.unref?.();
       });
 
-      content = await Promise.race([
-        this.client.get(remotePath) as Promise<Buffer>,
-        timeoutPromise,
-      ]);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rawSftp = (this.client as any).sftp;
+      const downloadPromise = rawSftp
+        ? this.downloadToBuffer(rawSftp, remotePath)
+        : (this.client.get(remotePath) as Promise<Buffer>);
+
+      content = await Promise.race([downloadPromise, timeoutPromise]);
     } catch (err: unknown) {
       if (timedOut) {
-        // Force-close the session so the abandoned client.get() promise is aborted
-        try { await this.client.end(); } catch { /* ignore cleanup errors */ }
+        // Force-close so any in-flight reads are aborted
+        try { await this.client.end(); } catch { /* ignore */ }
         this.connected = false;
       }
       const structured = transformError(toError(err));
@@ -378,10 +410,6 @@ export class SftpClient {
     }
 
     const durationMs = Date.now() - startTime;
-
-    // Ensure `content` is a proper Buffer (ssh2-sftp-client can return a
-    // writable stream or Buffer depending on options; with no dst arg it
-    // returns Buffer).
     const buf = Buffer.isBuffer(content) ? content : Buffer.from(String(content));
 
     logEvent(dlLogger, {
@@ -391,16 +419,85 @@ export class SftpClient {
       durationMs,
     });
 
-    dlLogger.debug(
-      { fileName: filename, sizeBytes: buf.length, durationMs },
-      'File downloaded'
-    );
+    dlLogger.debug({ fileName: filename, sizeBytes: buf.length, durationMs }, 'File downloaded');
 
-    return {
-      content: buf,
-      sizeBytes: buf.length,
-      durationMs,
-    };
+    return { content: buf, sizeBytes: buf.length, durationMs };
+  }
+
+  /**
+   * Schedules overlapping SFTP READ calls to keep the SSH channel busy across RTT
+   * (similar idea to ssh2 `fastXfer` / desktop SFTP clients with parallel reads).
+   */
+  private downloadToBuffer(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    sftp: any,
+    remotePath: string,
+    concurrency = DOWNLOAD_PARALLEL_RPCS,
+    chunkSize = DOWNLOAD_PARALLEL_CHUNK_BYTES,
+  ): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      sftp.open(remotePath, 'r', (openErr: Error | null, handle: Buffer) => {
+        if (openErr) return reject(openErr);
+
+        sftp.fstat(handle, (statErr: Error | null, stats: { size: number }) => {
+          if (statErr) {
+            sftp.close(handle, () => { /* ignore */ });
+            return reject(statErr);
+          }
+
+          const fileSize = stats.size;
+
+          if (fileSize === 0) {
+            sftp.close(handle, () => resolve(Buffer.alloc(0)));
+            return;
+          }
+
+          const output = Buffer.allocUnsafe(fileSize);
+          const totalChunks = Math.ceil(fileSize / chunkSize);
+          let completed = 0;
+          let nextOffset = 0;
+          let inFlight = 0;
+          let done = false;
+
+          function onError(err: Error) {
+            if (done) return;
+            done = true;
+            sftp.close(handle, () => reject(err));
+          }
+
+          function scheduleReads() {
+            while (inFlight < concurrency && nextOffset < fileSize) {
+              const offset = nextOffset;
+              const length = Math.min(chunkSize, fileSize - offset);
+              nextOffset += length;
+              inFlight++;
+
+              sftp.read(
+                handle,
+                output,
+                offset,
+                length,
+                offset,
+                (readErr: Error | null) => {
+                  if (done) return;
+                  if (readErr) return onError(readErr);
+                  inFlight--;
+                  completed++;
+                  if (completed === totalChunks) {
+                    done = true;
+                    sftp.close(handle, () => resolve(output));
+                  } else {
+                    scheduleReads();
+                  }
+                },
+              );
+            }
+          }
+
+          scheduleReads();
+        });
+      });
+    });
   }
 
   // -------------------------------------------------------------------------
